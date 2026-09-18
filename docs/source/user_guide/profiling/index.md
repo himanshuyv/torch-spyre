@@ -7,6 +7,7 @@
 environment_variables
 ffdc
 pytorch_profiler
+phase_timing
 device_monitoring
 trace_analysis
 performance_analysis_methodology
@@ -38,6 +39,7 @@ in-tree profiling APIs will land with RFC 0601.
 | Compiler pipeline logs | Available | [Environment variables](environment_variables.md) |
 | FFDC diagnostic reports on Spyre compile/runtime/unimplemented failures | Available (`TORCH_SPYRE_FFDC=1`) | [FFDC user guide](ffdc.md) · [API: `get_diagnostic_report`](../../api/torch_spyre.rst) · [Environment variables](environment_variables.md) |
 | CPU-side timing with `torch.profiler` | Available | [PyTorch Profiler](pytorch_profiler.md) |
+| Compile-time breakdown (frontend / DeepTools) and launch enqueue cost, without a trace | Available (`TORCH_SPYRE_PHASE_TIMING=1`) | [Phase timing](phase_timing.md) |
 | Device telemetry (power, temperature, bandwidth) | Available — PF and VF mode (IBM-internal distribution; public release tracked in [#1335][issue-1335]) | [Device monitoring](device_monitoring.md) |
 | Device-side kernel timing via `ProfilerActivity.PrivateUse1` | Merged and built by default ([#1856][pr-1856]) via upstream Kineto and `libaiupti` | [PyTorch Profiler](pytorch_profiler.md) |
 | Trace post-processing (aiu-trace-analyzer) | Available, known gaps | [Trace analysis](trace_analysis.md) |

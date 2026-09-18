@@ -22,5 +22,15 @@ Device-side timing uses upstream ``torch.profiler``. Device presence is
 """
 
 from torch_spyre.profiler._ffdc import get_diagnostic_report
+from torch_spyre.profiler._phase_timing import (
+    get_phase_timing_report,
+    phase_timing_enabled,
+    reset_phase_timing,
+)
 
-__all__ = ["get_diagnostic_report"]
+__all__ = [
+    "get_diagnostic_report",
+    "get_phase_timing_report",
+    "phase_timing_enabled",
+    "reset_phase_timing",
+]

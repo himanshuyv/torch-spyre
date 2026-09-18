@@ -39,6 +39,7 @@ from torch_spyre._inductor.kernel_provenance import (
 )
 from torch_spyre._inductor.codegen.bundle import generate_bundle
 from torch_spyre.profiler._ffdc import CATEGORY_COMPILE_BACKEND, try_collect
+from torch_spyre.profiler import _phase_timing
 from .kernel_runner import SpyreSDSCKernelRunner, SpyreUnimplementedRunner
 from .kernel_cache import (
     allocate_compile_dir,
@@ -119,11 +120,12 @@ def _run_dxp(kernel_name: str, compile_dir: str, env: dict[str, str]) -> str:
     """
     with torch.profiler.record_function(f"dxp_standalone:{kernel_name}"):
         try:
-            subprocess.run(
-                ["dxp_standalone", "-d", compile_dir],
-                check=True,
-                env=env,
-            )
+            with _phase_timing.phase_with_child_cpu("backend.dxp_standalone"):
+                subprocess.run(
+                    ["dxp_standalone", "-d", compile_dir],
+                    check=True,
+                    env=env,
+                )
         except subprocess.CalledProcessError as exc:
             try_collect(
                 exc,
@@ -160,7 +162,8 @@ class _SpyreCompileFuture(CodeCacheFuture):
             return self._runner
 
         try:
-            self._task.result(timeout=timeout)
+            with _phase_timing.phase("backend.dxp_wait"):
+                self._task.result(timeout=timeout)
         except FuturesTimeoutError:
             # The worker is still active; do not move its directory out from
             # underneath it.  AsyncCompile.wait() adds the timeout diagnostic.
@@ -218,6 +221,12 @@ class SpyreAsyncCompile(AsyncCompile):
 
     def _submit_dxp(self, kernel_name: str, compile_dir: str) -> Future[str] | None:
         """Submit DXP to Inductor's process pool, or compile synchronously."""
+        with _phase_timing.phase("backend.dxp_submit"):
+            return self._submit_dxp_inner(kernel_name, compile_dir)
+
+    def _submit_dxp_inner(
+        self, kernel_name: str, compile_dir: str
+    ) -> Future[str] | None:
         if _spyre_config.async_dxp_compile and get_compile_threads() > 1:
             # The first use creates the pool and submits its readiness probe.
             # Waiting for that short probe guarantees the first Spyre kernel is
@@ -314,20 +323,23 @@ class SpyreAsyncCompile(AsyncCompile):
                 if cached_dir is not None:
                     logger.debug("Cache HIT: Using cached kernel from: %s", cached_dir)
                     get_kernel_registry().record_hit(cache_key)
+                    _phase_timing.count("backend.kernel_cache", hits=1)
                     return SpyreSDSCKernelRunner(
                         kernel_name, cached_dir, kernel_provenance=kernel_provenance
                     )
 
                 logger.debug("Cache MISS: Compiling kernel")
                 get_kernel_registry().record_miss(cache_key)
+                _phase_timing.count("backend.kernel_cache", misses=1)
 
                 # Allocate a temp dir INSIDE the cache root (same filesystem)
                 # so the rename in commit_compile_dir is atomic on POSIX.
                 compile_dir: str = allocate_compile_dir(cache_key)
                 try:
-                    generate_bundle(
-                        kernel_name, compile_dir, specs, pool_size=pool_size
-                    )
+                    with _phase_timing.phase("frontend.generate_bundle"):
+                        generate_bundle(
+                            kernel_name, compile_dir, specs, pool_size=pool_size
+                        )
                     task = self._submit_dxp(kernel_name, compile_dir)
                     if task is not None:
                         return self._compile_future(
@@ -351,7 +363,8 @@ class SpyreAsyncCompile(AsyncCompile):
         # Caching disabled (SPYRE_KERNEL_CACHE=0 or force_disable_caches).
         # Compile into a throw-away temp dir that lives for this process only.
         output_dir = get_output_dir(kernel_name)
-        generate_bundle(kernel_name, output_dir, specs, pool_size=pool_size)
+        with _phase_timing.phase("frontend.generate_bundle"):
+            generate_bundle(kernel_name, output_dir, specs, pool_size=pool_size)
         task = self._submit_dxp(kernel_name, output_dir)
         if task is not None:
             return self._compile_future(
@@ -442,13 +455,14 @@ class SpyreAsyncCompile(AsyncCompile):
         # to one backend for its lifetime via ``ktir_emitter``.
         with torch.profiler.record_function(f"dbo-opt:{kernel_name}"):
             try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=_COMPILE_TIMEOUT_S,
-                )
+                with _phase_timing.phase_with_child_cpu("backend.dbo_opt"):
+                    proc = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                        timeout=_COMPILE_TIMEOUT_S,
+                    )
                 # dbo-opt can exit 0 having written nothing, so the artifact
                 # itself -- not the return code -- is the success condition.
                 spyrecode = os.path.join(output_dir, "spyreCodeDir", "spyrecode.json")

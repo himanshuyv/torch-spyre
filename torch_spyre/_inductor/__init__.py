@@ -22,6 +22,7 @@ from typing import Any
 
 from .propagate_hints import spyre_hint, get_op_hints  # noqa: F401
 from torch_spyre.profiler._ffdc import CATEGORY_COMPILE_FRONTEND, try_collect
+from torch_spyre.profiler import _phase_timing
 
 _autoload_lock = threading.Lock()
 
@@ -178,7 +179,10 @@ def enable_spyre_compile_fx_wrapper():
                     _prev_in_spyre = getattr(_compile_state, "in_spyre_compile", False)
                     _compile_state.in_spyre_compile = True
                     try:
-                        with enable_spyre_context(example_inputs):
+                        with (
+                            enable_spyre_context(example_inputs),
+                            _phase_timing.phase("frontend.compile_fx"),
+                        ):
                             return _orig(gm, example_inputs, *args, **kwargs)
                     finally:
                         _compile_state.in_spyre_compile = _prev_in_spyre

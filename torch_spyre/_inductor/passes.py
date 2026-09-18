@@ -37,6 +37,7 @@ from torch._inductor.scheduler import BaseSchedulerNode
 
 from .logging_utils import get_inductor_logger
 from .provenance import SpyreGraphTransformObserver, reset_provenance_warnings
+from torch_spyre.profiler import _phase_timing
 
 from .padding import insert_bmm_padding, insert_restickify_padding
 from .temp_passes import (
@@ -175,8 +176,12 @@ class _SpyreGraphPassPipeline(CustomGraphPass):
         # FX-graph passes are already observed by upstream Inductor's
         # GraphTransformObserver (populates node.meta["from_node"]); no Spyre
         # observer is wrapped here.
-        for p in self.passes:
-            p(graph)
+        pipeline = type(self).__name__
+        with _phase_timing.phase(f"frontend.{pipeline}"):
+            for p in self.passes:
+                name = _get_pass_name(p)
+                with _phase_timing.phase(f"frontend.{pipeline}.{name}"):
+                    p(graph)
 
     def uuid(self) -> Any | None:
         return _uuid(self.passes)
@@ -197,10 +202,11 @@ class _SpyreNodePassPipeline(CustomSchedulerPass):
         # This pipeline is a per-compile entry point for the observed passes,
         # so clear the dedup here so each compile warns afresh.
         reset_provenance_warnings()
+        pipeline = type(self).__name__
         for pass_fn in self.passes:
             name = _get_pass_name(pass_fn)
             observer = SpyreGraphTransformObserver(target, name, kind="node")
-            with observer:
+            with observer, _phase_timing.phase(f"frontend.{pipeline}.{name}"):
                 target = pass_fn(target)
                 # Reconcile the returned list while recursively inspecting the
                 # underlying buffers through scheduler get_nodes().
@@ -564,7 +570,10 @@ class CustomPreSchedulingPasses:
             # is exact here.
             with SpyreGraphTransformObserver(graph, pass_name, kind="graphlowering"):
                 t0 = time.perf_counter()
-                pass_fn(graph)
+                with _phase_timing.phase(
+                    f"frontend.CustomPreSchedulingPasses.{pass_name}"
+                ):
+                    pass_fn(graph)
                 elapsed_ms = (time.perf_counter() - t0) * 1000
 
             if logger.isEnabledFor(logging.INFO):

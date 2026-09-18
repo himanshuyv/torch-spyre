@@ -45,6 +45,7 @@ from .scratchpad.lx_relayout import (
 from .op_spec import LoopSpec
 from . import config as _spyre_config
 from .errors import Unsupported
+from torch_spyre.profiler import _phase_timing
 
 logger = get_inductor_logger("scheduler")
 
@@ -653,6 +654,14 @@ class SuperDSCScheduling(BaseScheduling):
         nodes = self._live_nodes(node)
         if len(nodes) == 0:
             return
+        with _phase_timing.phase("frontend.codegen_node"):
+            self._codegen_node_inner(node, nodes)
+
+    def _codegen_node_inner(
+        self,
+        node: Union[FusedSchedulerNode, SchedulerNode, CountedLoopSchedulerNode],
+        nodes,
+    ) -> None:
         name = node.get_name()
         leaf_names = {leaf.get_name() for leaf in _all_scheduler_nodes(nodes)}
         kernel: SpyreKernel | None = getattr(node, "prepared_kernel", None)

@@ -68,6 +68,19 @@ The `torch_spyre.*` namespace is only for the `TORCH_LOGS` environment variable.
 |---|---|
 | `SENCORES=<1..32>` | Number of Spyre cores to target (default 32) |
 
+## Phase timing
+
+| Variable | Effect |
+|---|---|
+| `TORCH_SPYRE_PHASE_TIMING=1` | Print an aggregated frontend / DeepTools-backend / runtime-launch time breakdown to stderr at exit. Accepts `1/0`, `true/false`, `yes/no`, `on/off`. Independent of `torch.profiler` -- no trace is collected. |
+| `TORCH_SPYRE_PHASE_TIMING_JSON=<path>` | Also write the phase-timing report as JSON to `<path>`. |
+
+Pair with `TORCHINDUCTOR_FORCE_DISABLE_CACHES=1` **and** `SPYRE_KERNEL_CACHE=0`
+for a cold-compile measurement: on a kernel-cache hit the backend compiler never
+runs, so its time reads as zero. Add `TORCHINDUCTOR_COMPILE_THREADS=1` to force
+DXP inline, so backend time is attributed to one serial phase instead of
+overlapping pool waits. See [Phase timing](phase_timing.md).
+
 ## FFDC (First Failure Data Capture)
 
 | Variable | Effect |

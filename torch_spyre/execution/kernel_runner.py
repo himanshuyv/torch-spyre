@@ -29,6 +29,7 @@ from torch_spyre.profiler._ffdc import (
     CATEGORY_UNIMPLEMENTED,
     with_ffdc,
 )
+from torch_spyre.profiler import _phase_timing
 
 logger = get_inductor_logger("kernel_runner")
 
@@ -91,23 +92,31 @@ class SpyreSDSCKernelRunner:
             # prepare_kernel(), which calls into JobPlanBuilder/getDefaultStream().
             torch.spyre._impl._lazy_init()
             spyrecode_dir = self.code_dir + "/spyreCodeDir"
-            if self.profiler_event_name is None:
-                self._jobplan = prepare_kernel(spyrecode_dir)
-            else:
-                with torch.profiler.record_function(
-                    f"prepare_kernel:{self.kernel_name}"
-                ):
-                    self._jobplan = prepare_kernel(
-                        spyrecode_dir,
-                        profiler_name=self.profiler_event_name,
-                    )
+            with _phase_timing.phase("runtime.prepare_kernel"):
+                if self.profiler_event_name is None:
+                    self._jobplan = prepare_kernel(spyrecode_dir)
+                else:
+                    with torch.profiler.record_function(
+                        f"prepare_kernel:{self.kernel_name}"
+                    ):
+                        self._jobplan = prepare_kernel(
+                            spyrecode_dir,
+                            profiler_name=self.profiler_event_name,
+                        )
         return self._jobplan
 
     @with_ffdc(CATEGORY_RUNTIME_LAUNCH, logger)
     def run(self, *args, symbolic_args: list[SymbolicArg] | None = None, **kw_args):
         logger.info("RUN: %s %s", self.kernel_name, self.code_dir)
+        # Resolve the (possibly lazy) jobplan before timing so a first-call
+        # prepare_kernel lands in runtime.prepare_kernel, not in the launch
+        # phase. Launch itself is asynchronous: this measures host-side enqueue
+        # into flex, NOT device execution -- device time needs AIUPTI or
+        # FLEX_TIMING_PROFILE.
+        jobplan = self.jobplan
         with torch.profiler.record_function(f"launch_jobplan:{self.kernel_name}"):
-            if symbolic_args:
-                launch_jobplan(self.jobplan, args, symbolic_args)
-            else:
-                launch_jobplan(self.jobplan, args)
+            with _phase_timing.phase("runtime.launch_jobplan"):
+                if symbolic_args:
+                    launch_jobplan(jobplan, args, symbolic_args)
+                else:
+                    launch_jobplan(jobplan, args)
