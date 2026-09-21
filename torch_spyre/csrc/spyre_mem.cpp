@@ -494,7 +494,7 @@ auto generate_dci(const at::Tensor* cpu_tensor, const at::Tensor* dev_tensor,
                         torch_spyre::logging::LogLevel::DEBUG)) {
     std::stringstream s;
     dci.exportJson(s);
-    SPYRE_RUNTIME_DEBUG() << __func__ << ": DataConversionInfo: " << s.str();
+    SPYRE_RUNTIME_DEBUG() << "DataConversionInfo: " << s.str();
   }
   return dci;
 }
@@ -508,8 +508,7 @@ at::Tensor spyre_empty(c10::IntArrayRef size,
                        std::optional<c10::MemoryFormat> memory_format_opt) {
   c10::Device device = device_opt.value_or(
       c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
-  SPYRE_RUNTIME_DEBUG() << __func__ << ": shape=" << size << " on Spyre "
-                        << device;
+  SPYRE_RUNTIME_DEBUG() << "shape=" << size << " on Spyre " << device;
   const auto dtype = c10::dtype_or_default(dtype_opt);
   TORCH_CHECK(device.is_privateuseone());
   TORCH_CHECK(c10::layout_or_default(layout_opt) == c10::Layout::Strided,
@@ -546,8 +545,7 @@ at::Tensor spyre_empty(c10::IntArrayRef size,
   spyre_tensor_impl->spyre_layout = device_layout;
   spyre_tensor_impl->dma_sizes = size.vec();
   spyre_tensor_impl->dma_strides = tensor.strides().vec();
-  SPYRE_RUNTIME_DEBUG() << __func__
-                        << ": SpyreTensorLayout: " << device_layout.toString();
+  SPYRE_RUNTIME_DEBUG() << "SpyreTensorLayout: " << device_layout.toString();
   return tensor;
 }
 
@@ -572,7 +570,7 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   caffe2::TypeMeta dtype = c10::scalarTypeToTypeMeta(scalar_type);
   c10::Device device = device_opt.value_or(
       c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
-  SPYRE_RUNTIME_DEBUG() << __func__ << ": Tensor info on CPU (Size:" << size
+  SPYRE_RUNTIME_DEBUG() << "Tensor info on CPU (Size:" << size
                         << ", Stride: " << stride << ", dtype: " << dtype
                         << ") to be mapped onto device " << device;
   auto device_layout = SpyreTensorLayout(size.vec(), stride.vec(), scalar_type,
@@ -603,8 +601,7 @@ at::Tensor spyre_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride,
   spyre_tensor_impl->dma_sizes = size.vec();
   spyre_tensor_impl->dma_strides = stride.vec();
 
-  SPYRE_RUNTIME_DEBUG() << __func__
-                        << ": SpyreTensorLayout: " << device_layout.toString();
+  SPYRE_RUNTIME_DEBUG() << "SpyreTensorLayout: " << device_layout.toString();
   return tensor;
 }
 
@@ -642,15 +639,14 @@ at::Tensor spyre_empty_with_layout(c10::IntArrayRef size,
   spyre_tensor_impl->spyre_layout = device_layout;
   spyre_tensor_impl->dma_sizes = size.vec();
   spyre_tensor_impl->dma_strides = stride.vec();
-  SPYRE_RUNTIME_DEBUG() << __func__
-                        << ": SpyreTensorLayout: " << device_layout.toString();
+  SPYRE_RUNTIME_DEBUG() << "SpyreTensorLayout: " << device_layout.toString();
   return tensor;
 }
 
 at::Tensor& spyre_set_storage(at::Tensor& result, at::Storage storage,
                               int64_t storage_offset, c10::IntArrayRef size,
                               c10::IntArrayRef stride) {
-  SPYRE_RUNTIME_DEBUG() << __func__ << ": set method";
+  SPYRE_RUNTIME_DEBUG() << "set method";
   return at::cpu::set_(result, storage, storage_offset, size, stride);
 }
 
@@ -727,8 +723,7 @@ at::Tensor empty_with_layout(
     std::optional<c10::MemoryFormat> memory_format_opt) {
   c10::Device device = device_opt.value_or(
       c10::impl::VirtualGuardImpl{c10::DeviceType::PrivateUse1}.getDevice());
-  SPYRE_RUNTIME_DEBUG() << __func__ << ": shape=" << size << " on Spyre "
-                        << device;
+  SPYRE_RUNTIME_DEBUG() << "shape=" << size << " on Spyre " << device;
   const auto dtype = c10::dtype_or_default(dtype_opt);
   TORCH_CHECK(device.is_privateuseone());
   TORCH_CHECK(c10::layout_or_default(layout_opt) == c10::Layout::Strided,
@@ -764,8 +759,7 @@ at::Tensor empty_with_layout(
   spyre_tensor_impl->spyre_layout = device_layout;
   spyre_tensor_impl->dma_sizes = size.vec();
   spyre_tensor_impl->dma_strides = tensor.strides().vec();
-  SPYRE_RUNTIME_DEBUG() << __func__
-                        << ": SpyreTensorLayout: " << device_layout.toString();
+  SPYRE_RUNTIME_DEBUG() << "SpyreTensorLayout: " << device_layout.toString();
   return tensor;
 }
 
@@ -816,7 +810,7 @@ const at::Tensor& spyre_resize_(
     self_impl->spyre_layout = new_layout;
     self_impl->dma_sizes = size_int.vec();
     self_impl->dma_strides = self_impl->strides().vec();
-    SPYRE_RUNTIME_DEBUG() << __func__ << ": resize_ to shape=" << size_int
+    SPYRE_RUNTIME_DEBUG() << "to shape=" << size_int
                           << " layout=" << self_impl->spyre_layout.toString();
     return self;
   }
@@ -835,7 +829,7 @@ const at::Tensor& spyre_resize_(
   self_impl->dma_sizes = size_int.vec();
   self_impl->dma_strides = self_impl->strides().vec();
   at::_copy_from(cpu_buf, self, /*non_blocking=*/false);
-  SPYRE_RUNTIME_DEBUG() << __func__ << ": resize_ expand to shape=" << size_int
+  SPYRE_RUNTIME_DEBUG() << "expand to shape=" << size_int
                         << " layout=" << self_impl->spyre_layout.toString();
   return self;
 }
