@@ -279,11 +279,17 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   runtime_activity->device = activity->process_id;
   runtime_activity->resource = libkineto::systemThreadId();
   runtime_activity->threadId = libkineto::threadId();
-  // only enable outgoing flow for launch control block runtime activities
-  if (activity->cbid == AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB_CMPT) {
-    runtime_activity->flow.id = activity->correlation_id;
-  } else {
-    runtime_activity->flow.id = 0;
+  // Outgoing flow for every CB-launch runtime activity; all share the device
+  // activity's correlation_id (flex batch_id).
+  switch (activity->cbid) {
+    case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB_CMPT:
+    case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB_DMI:
+    case AIUPTI_RUNTIME_TRACE_CBID_LAUNCH_CB_DMO:
+      runtime_activity->flow.id = activity->correlation_id;
+      break;
+    default:
+      runtime_activity->flow.id = 0;
+      break;
   }
   runtime_activity->flow.type = libkineto::kLinkAsyncCpuGpu;
   runtime_activity->flow.start = static_cast<bool>(
@@ -460,7 +466,8 @@ void AiuptiActivityProfilerSession::handleMemcpyActivity(
   memcpy_activity->device = activity->device_id;
   memcpy_activity->resource = getResourceId(activity);
   memcpy_activity->threadId = activity->stream_id;
-  memcpy_activity->flow.id = 0;
+  // Flow sink for the DMI/DMO launch sharing this correlation id.
+  memcpy_activity->flow.id = activity->correlation_id;
   memcpy_activity->flow.type = libkineto::kLinkAsyncCpuGpu;
   memcpy_activity->flow.start = 0;
   memcpy_activity->linked = linked;
