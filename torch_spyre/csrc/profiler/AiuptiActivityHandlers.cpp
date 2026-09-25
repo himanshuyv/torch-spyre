@@ -277,8 +277,12 @@ void AiuptiActivityProfilerSession::handleRuntimeActivity(
   runtime_activity->endTime = activity->end;
   runtime_activity->id = activity->correlation_id;
   runtime_activity->device = activity->process_id;
-  runtime_activity->resource = libkineto::systemThreadId();
-  runtime_activity->threadId = libkineto::threadId();
+  // Use the thread that emitted the event, not the one draining the buffer.
+  // Runtime activities come from several threads; stamping the draining thread
+  // put them all on one track, where concurrent spans overlap and Perfetto
+  // spills them onto an overflow track.
+  runtime_activity->resource = activity->thread_id;
+  runtime_activity->threadId = activity->thread_id;
   // Outgoing flow for every CB-launch runtime activity; all share the device
   // activity's correlation_id (flex batch_id).
   switch (activity->cbid) {
