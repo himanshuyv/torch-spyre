@@ -128,12 +128,12 @@ void AiuptiActivityProfilerSession::recordThreadStream(uint32_t device,
   // Change in flex will automatically change it to real thread id.
   if (!hasDeviceResource(device, id)) {
     const int64_t sort_index = static_cast<int64_t>(device) + id;
-    resourceInfo_.emplace(std::make_pair(device, id),
-                          libkineto::ResourceInfo{
-                              .id = id,
-                              .sortIndex = sort_index,
-                              .deviceId = device,
-                              .name = fmt::format("Thread {}", id)});
+    resourceInfo_.emplace(
+        std::make_pair(device, id),
+        libkineto::ResourceInfo{.id = id,
+                                .sortIndex = sort_index,
+                                .deviceId = device,
+                                .name = fmt::format("Thread {}", id)});
   }
 }
 
