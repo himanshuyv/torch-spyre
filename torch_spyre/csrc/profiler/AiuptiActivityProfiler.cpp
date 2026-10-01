@@ -121,13 +121,19 @@ void AiuptiActivityProfilerSession::recordStream(uint32_t device, uint32_t id) {
 
 void AiuptiActivityProfilerSession::recordThreadStream(uint32_t device,
                                                        uint32_t id) {
+  if (id == device) {
+    return;
+  }
+  // Right now id is thread counter id, not the actual thread id.
+  // Change in flex will automatically change it to real thread id.
   if (!hasDeviceResource(device, id)) {
-    // Create sort_index based on the pid and dummy thread ids for other threads
     const int64_t sort_index = static_cast<int64_t>(device) + id;
-    resourceInfo_.emplace(
-        std::make_pair(device, id),
-        libkineto::ResourceInfo(id, sort_index, device,
-                                fmt::format("Thread {}", id)));
+    resourceInfo_.emplace(std::make_pair(device, id),
+                          libkineto::ResourceInfo{
+                              .id = id,
+                              .sortIndex = sort_index,
+                              .deviceId = device,
+                              .name = fmt::format("Thread {}", id)});
   }
 }
 
