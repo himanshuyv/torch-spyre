@@ -1402,6 +1402,7 @@ def test_duplicate_kernel_start_timestamps(tmp_path):
             f"detected:\n" + "\n".join(duplicate_details)
         )
 
+
 @pytest.mark.requires_spyre_profiler
 def test_runtime_events_emitted_on_multiple_thread_rows():
     """Runtime activities are attributed to the flex thread that emitted them,
