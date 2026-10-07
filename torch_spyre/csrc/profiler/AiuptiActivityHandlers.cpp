@@ -254,6 +254,8 @@ inline std::string runtimeCbidName(AIUpti_runtime_api_trace_cbid cbid) {
       return "aiuCommsBenchAllreduce";
     case AIUPTI_RUNTIME_TRACE_CBID_SUBMIT_TO_HARDWARE:
       return "aiuSubmitToHardware";
+    case AIUPTI_RUNTIME_TRACE_CBID_FLEX_ROUNDTRIP:
+      return "flexRoundTrip";
     default:
       break;
   }
