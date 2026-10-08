@@ -3329,7 +3329,6 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "tuple": (((64, 64)), 1024.0),
                 "size": (torch.Size([64, 128]), 1024.0),
             },
-            "expect_fail": ["value_2"],
         },
         (
             "test_dropout_functional",
@@ -8436,7 +8435,15 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         def fn(device=None):
             return torch.full(*args, dtype=torch.float16, device=device)
 
-        self.compare_with_cpu(fn, needs_device=True, cpu_compile=False)
+        # -65504 is the fp16 limit: the pointwise lx wrap's (x + x) / 2 overflows
+        # fp16 on the CPU but not in DLFloat16, so give the lx wraps an fp64
+        # reference to transform.
+        self.compare_with_cpu(
+            fn,
+            needs_device=True,
+            cpu_compile=False,
+            dlfloat16_reference=torch.full(*args, dtype=torch.float64),
+        )
 
     def test_full_bfloat16_cpu(self):
         """Compiled BF16 ``full`` stays in native Spyre lowering."""
