@@ -103,7 +103,6 @@ from collections import Counter
 import logging
 import math
 import operator
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -537,37 +536,6 @@ _inv_rel_op = {
 }
 
 
-@cache
-def get_cpu_count() -> int:
-    """CPUs this process may actually use, after spyre-inference's
-    ``threading_config.get_cpu_count``. Resolution order: ``SPYRE_NUM_CPUS``,
-    the cgroup v2 CPU quota, psutil's physical core count, ``os.cpu_count()``.
-
-    ``os.cpu_count()`` reports the host (128 on the dev pods) while the
-    container is limited to 16; CP-SAT with 8x more search workers than cores
-    thrashes instead of searching, and the oversubscription starves everything
-    else in the pod."""
-    env = os.environ.get("SPYRE_NUM_CPUS", "")
-    if env.strip().isdigit() and int(env) > 0:
-        return int(env)
-    try:
-        with open("/sys/fs/cgroup/cpu.max") as f:
-            quota, period = f.read().split()
-        if quota != "max":
-            return max(1, int(quota) // int(period))
-    except (OSError, ValueError):
-        pass
-    try:
-        import psutil
-
-        physical = psutil.cpu_count(logical=False)
-        if physical:
-            return int(physical)
-    except ImportError:
-        pass
-    return os.cpu_count() or 1
-
-
 class _LazyMin(sympy.Min):
     """``Min`` built without canonicalization. An evaluated ``Min``/``Max`` runs
     sympy's pairwise dominance check on its arguments (``_find_localzeros``),
@@ -913,7 +881,7 @@ class _SympyExprToCpSat(Printer):
         elif expr.func == sympy.Pow:
             if not self._is_split_sym(arg):
                 return expr
-            if expr.exp == 0.25:
+            if expr.exp.is_Number and math.isclose(expr.exp, 0.25):
                 # Discrete piecewise linear approximation of x^(1/4) over the interval [1, 32],
                 # pinned to return 1 at x=1, generated using tools/approximate-power.py.
                 # since we check that the base is a _split_ symbol, it is an integer in the
@@ -1376,9 +1344,9 @@ class _SympyExprToCpSat(Printer):
             lb, ub = _SympyExprToCpSat._affine_bounds(expr.expression)
             c, o = int(expr.coefficient), int(expr.offset)
             lb, ub = (c * lb + o, c * ub + o) if c >= 0 else (c * ub + o, c * lb + o)
-        elif hasattr(expr, "num_exprs"):
-            # SumArray (e.g. from ``a + b + c`` or ``sum(...)``): flatten to a
-            # single offset + per-var coefficients and bound each term.
+        elif isinstance(expr, cp_model.LinearExpr):
+            # Flatten sums and folded constants (e.g. ``0 * is_lx``) to an
+            # offset + per-var coefficients and bound each term.
             flat = cp_model.FlatIntExpr(expr)
             lb = ub = int(flat.offset)
             for var, c in zip(flat.vars, flat.coeffs):
@@ -1926,7 +1894,9 @@ class CpSatLayoutSolver(CoreDivisionLayoutSolver):
                 max_copies,
             )
         solver.parameters.num_search_workers = (
-            1 if torch.are_deterministic_algorithms_enabled() else get_cpu_count()
+            1
+            if torch.are_deterministic_algorithms_enabled()
+            else config.get_cpu_count()
         )
         # Fixed seed so a given worker configuration is reproducible run-to-run.
         solver.parameters.random_seed = 0
