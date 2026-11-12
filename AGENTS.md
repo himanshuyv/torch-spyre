@@ -138,6 +138,7 @@ them with `PARAMS`, and `pr-review` checks them.
 | `TORCH_SPYRE_FFT_W_CACHE_BYTES` | Byte budget for the cached fp16 DFT matrices (`torch_spyre.ops.fft`); LRU-evicted when exceeded (default: forward+inverse at the direct ceiling) |
 | `TORCH_SPYRE_NARROWING_CHECK` | Guards that split a `dynamic=` range: `warn` (default), `error`, `off` |
 | `TORCH_SPYRE_RECOMPILE_CHECK` | Recompiles that break a `dynamic=` range: `warn` (default), `error`, `all`, `off` |
+| `SPYRE_BACKEND_PASS_TIMING=1` | Run `dbo-opt` with MLIR pass timing; save each report and process span beside its bundle |
 
 ## Spyre Hardware Basics
 

@@ -443,6 +443,7 @@ def test_each_cache_key_ignore_prefix_matches_only_known_settings():
     assert matched == {
         "num_cpus": ["num_cpus"],
         "backend_compile_timeout_seconds": ["backend_compile_timeout_seconds"],
+        "backend_pass_timing": ["backend_pass_timing"],
         "timing": ["timing", "timing_out"],
         "dump_cost_expr_file": ["dump_cost_expr_file"],
         "spyre_kernel_cache": ["spyre_kernel_cache"],
