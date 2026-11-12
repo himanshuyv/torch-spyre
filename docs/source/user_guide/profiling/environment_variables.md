@@ -251,6 +251,31 @@ the other compile's work, and a negative delta means another compile reset the
 store mid-pass. Profile with a single compiling thread to get per-compile
 figures.
 
+### Timing the backend's passes
+
+`TORCH_SPYRE_TIMING` times `dbo-opt` as one region per kernel. To see what
+it spends that time on, set `SPYRE_BACKEND_PASS_TIMING=1`: each `dbo-opt` then
+runs with MLIR's pass timing (`--mlir-timing --mlir-timing-display=tree`), and
+two files are written beside the kernel's bundle:
+
+- `dbo-opt.timing.rank<RANK>.txt` -- the timing report as `dbo-opt` printed
+  it: wall time per pass, nested as the pipeline is.
+- `dbo-opt.span.rank<RANK>.json` -- `start_ns` and `end_ns` of the `dbo-opt`
+  process, in epoch nanoseconds. That is the clock a profiler trace's
+  `baseTimeNanoseconds + ts` is on, so a run can be placed on the trace's
+  timeline even though it ran in a compile-pool worker the profiler cannot see.
+
+`RANK` is the variable `torchrun` sets (`0` when unset), so ranks sharing a
+cache directory do not overwrite each other's reports. A kernel-cache hit runs
+no `dbo-opt` and writes nothing, so measure with a cold cache. The setting does
+not change the compiled code and is not part of the cache key.
+
+The report has durations but no start times. When `dbo-opt` compiles a
+bundle's programs in parallel, it gives each its own pass manager, which the
+timing does not reach, so `dbo-run-program-pipelines` appears as one row.
+`DT_PARALLEL_THREADS=1` compiles them serially, and their passes then appear
+nested under it.
+
 ## FFDC (First Failure Data Capture)
 
 | Variable | Effect |

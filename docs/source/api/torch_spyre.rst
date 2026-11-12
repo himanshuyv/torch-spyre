@@ -834,6 +834,12 @@ Environment Variables
      - Wall-clock limit on one backend-compiler (``dbo-opt``) invocation,
        on both the SDSC bundle and KTIR paths (default ``60``;
        non-positive values disable the limit)
+   * - ``SPYRE_BACKEND_PASS_TIMING``
+     - Run each ``dbo-opt`` with MLIR pass timing (``--mlir-timing
+       --mlir-timing-display=tree``) and save, beside the kernel's bundle,
+       the report as ``dbo-opt.timing.rank<RANK>.txt`` and the process's
+       start and end (epoch ns) as ``dbo-opt.span.rank<RANK>.json``. Debug
+       aid; default ``0``, and not part of the cache key
    * - ``ENABLE_LX_CONTEXT_SWITCHING``
      - Bracket opaque ``FallbackKernel`` calls that have no native Spyre
        lowering with per-buffer LX dump and restore clones, so LX-resident

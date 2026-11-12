@@ -170,6 +170,15 @@ def _backend_compile_timeout_from_env() -> float:
 
 backend_compile_timeout_seconds: float = _backend_compile_timeout_from_env()
 
+# Debug aid: run each dbo-opt with MLIR pass timing (``--mlir-timing
+# --mlir-timing-display=tree``) and save, beside the kernel's bundle, the report
+# as ``dbo-opt.timing.rank<RANK>.txt`` and the process's start/end (epoch ns, the
+# profiler trace's clock) as ``dbo-opt.span.rank<RANK>.json``. Covers both the
+# SDSC bundle and KTIR paths. A kernel-cache hit runs no dbo-opt and writes
+# nothing. Off by default; it does not change the compiled code, so it is left
+# out of the cache key.
+backend_pass_timing: bool = os.environ.get("SPYRE_BACKEND_PASS_TIMING", "0") == "1"
+
 # Enable certified LX ownership changes: movement, exact fused-axis views,
 # consumer-compatible producer order, and same-core restickify residency.
 # Set SPYRE_LX_PLANNER_RELAYOUT=0 to disable these optional optimizations, not
@@ -612,6 +621,8 @@ _cache_config_ignore_prefix: list[str] = [
     "num_cpus",
     # A limit on compiler execution time, not an input to generated code.
     "backend_compile_timeout_seconds",
+    # Measures the backend compiler; the code it produces is the same.
+    "backend_pass_timing",
     # Where logs go and whether kernels are kept on disk: these do not change
     # the compiled code (spyre_kernel_cache only picks between the kernel disk
     # cache and a fresh backend compile). Without them, a run that only writes

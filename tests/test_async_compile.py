@@ -16,6 +16,7 @@
 
 from concurrent.futures import Future
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
@@ -175,6 +176,110 @@ def test_backend_compiler_forwards_loop_unroll_control(tmp_path, unroll, timeout
     assert run.call_args.kwargs["timeout"] == timeout
 
 
+@pytest.mark.parametrize("value,expected", [(None, False), ("0", False), ("1", True)])
+def test_backend_pass_timing_environment(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("SPYRE_BACKEND_PASS_TIMING", raising=False)
+    else:
+        monkeypatch.setenv("SPYRE_BACKEND_PASS_TIMING", value)
+    assert _load_config(monkeypatch).backend_pass_timing is expected
+
+
+_PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
+_TIMING_REPORT = "  Total Execution Time: 1.2345 seconds\n"
+
+
+def _compiled_dir(tmp_path: Path) -> Path:
+    """A compile dir in the state dbo-opt leaves it after a successful run."""
+    code_dir = tmp_path / "spyreCodeDir"
+    code_dir.mkdir()
+    (code_dir / "spyrecode.json").write_text("{}")
+    return tmp_path
+
+
+def _run_with_pass_timing(compile_dir: Path, env, pass_timing, stderr=_TIMING_REPORT):
+    with (
+        patch.object(async_compile_mod, "_check_backend_compiler_on_path"),
+        patch.object(
+            async_compile_mod.subprocess,
+            "run",
+            return_value=MagicMock(stderr=stderr),
+        ) as run,
+        patch.object(async_compile_mod.time, "time_ns", side_effect=[100, 250]),
+    ):
+        async_compile_mod._run_backend_compiler(
+            "kernel", str(compile_dir), env, True, "", 60.0, pass_timing
+        )
+    return run.call_args.args[0]
+
+
+def test_backend_pass_timing_off_adds_no_flags_and_writes_nothing(tmp_path):
+    compile_dir = _compiled_dir(tmp_path)
+    cmd = _run_with_pass_timing(compile_dir, {"RANK": "0"}, pass_timing=False)
+    assert not set(_PASS_TIMING_FLAGS) & set(cmd)
+    assert not list(compile_dir.glob("dbo-opt.*"))
+
+
+@pytest.mark.parametrize("env,rank", [({}, "0"), ({"RANK": "3"}, "3")])
+def test_backend_pass_timing_saves_report_and_span(tmp_path, env, rank):
+    """The flags reach dbo-opt, and its stderr report and process span are
+    written beside the bundle under the worker environment's RANK."""
+    compile_dir = _compiled_dir(tmp_path)
+    cmd = _run_with_pass_timing(compile_dir, env, pass_timing=True)
+
+    # Options, so before the positional bundle path.
+    for flag in _PASS_TIMING_FLAGS:
+        assert cmd.index(flag) < cmd.index(str(compile_dir / "bundle.mlir"))
+    report = compile_dir / f"dbo-opt.timing.rank{rank}.txt"
+    span = compile_dir / f"dbo-opt.span.rank{rank}.json"
+    assert report.read_text() == _TIMING_REPORT
+    recorded = json.loads(span.read_text())
+    assert (recorded["start_ns"], recorded["end_ns"]) == (100, 250)
+    assert recorded["pid"] == os.getpid()
+
+
+def test_backend_pass_timing_unwritable_dir_does_not_fail_compile(tmp_path):
+    compile_dir = _compiled_dir(tmp_path)
+    # A directory where the report file would go makes open() fail.
+    (compile_dir / "dbo-opt.timing.rank0.txt").mkdir()
+    with patch.object(async_compile_mod, "logger") as logger:
+        _run_with_pass_timing(compile_dir, {}, pass_timing=True)
+    logger.warning.assert_called_once()
+    assert "pass timing not saved" in logger.warning.call_args.args[0]
+
+
+def test_backend_pass_timing_not_saved_for_a_failed_compile(tmp_path):
+    """dbo-opt exiting 0 without spyrecode.json is a failure: no report."""
+    with pytest.raises(RuntimeError, match="wrote no"):
+        _run_with_pass_timing(tmp_path, {}, pass_timing=True)
+    assert not list(tmp_path.glob("dbo-opt.*"))
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("threads", [1, 2])
+def test_backend_pass_timing_is_forwarded_to_the_backend_compile(enabled, threads):
+    """Resolved in the parent and passed down, inline or to a pool worker."""
+    pool = _RecordingPool()
+    compiler = async_compile_mod.SpyreAsyncCompile()
+    with (
+        torch._inductor.config.patch({"compile_threads": threads}),
+        spyre_config.patch(backend_pass_timing=enabled),
+        patch.object(compiler, "wait_pool_ready"),
+        patch.object(compiler, "use_process_pool", return_value=True),
+        patch.object(compiler, "process_pool", return_value=pool),
+        patch.object(async_compile_mod, "_run_backend_compiler") as compile_backend,
+    ):
+        compiler._submit_backend_compile(
+            "sdsc_0",
+            "/tmp/kernel",
+            backend_loop_unroll=True,
+            ktir_device_mlir="",
+            timeout=60.0,
+        )
+    args = pool.calls[-1][1] if threads > 1 else compile_backend.call_args.args
+    assert args[6] is enabled
+
+
 @pytest.mark.parametrize("unroll", [False, True])
 def test_single_worker_compiles_inline_without_starting_pool(unroll):
     compiler = async_compile_mod.SpyreAsyncCompile()
@@ -185,6 +290,7 @@ def test_single_worker_compiles_inline_without_starting_pool(unroll):
             backend_loop_unroll=unroll,
             backend_compile_timeout_seconds=123.0,
             ktir_device_mlir="/parent/device.mlir",
+            backend_pass_timing=False,
         ),
         patch.object(compiler, "wait_pool_ready") as wait_ready,
         patch.object(compiler, "process_pool") as pool,
@@ -208,6 +314,7 @@ def test_single_worker_compiles_inline_without_starting_pool(unroll):
         unroll,
         "/parent/device.mlir",
         123.0,
+        False,
     )
 
 
@@ -331,6 +438,7 @@ def test_async_cache_commit_is_deferred_until_wait():
                 "backend_loop_unroll": False,
                 "ktir_device_mlir": "/parent/device.mlir",
                 "backend_compile_timeout_seconds": 123.0,
+                "backend_pass_timing": False,
             }
         ),
         patch.object(compiler, "wait_pool_ready"),
@@ -363,6 +471,7 @@ def test_async_cache_commit_is_deferred_until_wait():
             False,
             "/parent/device.mlir",
             123.0,
+            False,
         )
         commit.assert_not_called()
 
