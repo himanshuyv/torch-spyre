@@ -48,8 +48,6 @@ from .kernel_runner import (
     SpyreUnimplementedRunner,
 )
 from .kernel_cache import (
-    PASS_TIMING_REPORT_FILE,
-    PASS_TIMING_SPAN_FILE,
     PrecomputedKernelKeyMismatch,
     allocate_compile_dir,
     commit_compile_dir,
@@ -255,30 +253,81 @@ def _compile_to_dir(
 # MLIR's own pass timing, printed to stderr when dbo-opt exits. The tree display
 # keeps the pipeline's nesting. See ``backend_pass_timing`` in _inductor/config.
 _PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
+# Under the Inductor cache dir, beside (not inside) the Spyre kernel cache: a
+# measurement belongs to the run that made it, not to the reusable kernel.
+_PASS_TIMING_DIRNAME = "spyre-pass-timing"
+
+
+def _backend_pass_timing_dir() -> str | None:
+    """Where pass-timing records go, or None when ``backend_pass_timing`` is off.
+
+    Resolved in the parent and handed to the backend compile, like the other
+    settings, so a pool worker never reads config or its own environment for it.
+    """
+    if not _spyre_config.backend_pass_timing:
+        return None
+    return os.path.join(cache_dir(), _PASS_TIMING_DIRNAME)
+
+
+class _BackendRunClock:
+    """Times one dbo-opt run: wall clock to place it, monotonic to size it.
+
+    ``start_ns``/``end_ns`` are epoch nanoseconds, the same wall clock a
+    profiler trace's ``baseTimeNanoseconds + ts`` is expressed in, so a run can
+    be laid on the trace's timeline. ``duration_ns`` comes from the monotonic
+    clock, so a wall-clock step during a compile cannot distort it.
+    """
+
+    def __init__(self) -> None:
+        self.start_ns = time.time_ns()
+        self._t0 = time.monotonic_ns()
+        self.end_ns = self.duration_ns = 0
+
+    def stop(self) -> None:
+        self.duration_ns = time.monotonic_ns() - self._t0
+        self.end_ns = time.time_ns()
 
 
 def _save_backend_pass_timing(
-    out_dir: str, rank: str, report: str, start_ns: int, end_ns: int
+    timing_dir: str,
+    bundle_dir: str,
+    kernel_name: str,
+    rank: str,
+    report: str,
+    clock: _BackendRunClock,
 ) -> None:
-    """Write one dbo-opt run's pass-timing report and process span to out_dir.
+    """Record one dbo-opt run under ``timing_dir/<bundle dir name>/``.
 
-    ``dbo-opt.timing.rank<rank>.txt`` holds the report as dbo-opt printed it.
-    ``dbo-opt.span.rank<rank>.json`` holds when the run started and ended, in
-    epoch nanoseconds, the clock a profiler trace's ``baseTimeNanoseconds +
-    ts`` is on, so a run can be placed on the trace's timeline. Its ``pid`` is
-    the process that ran dbo-opt -- a compile-pool worker, or this process
-    when compiling inline -- not dbo-opt's own.
+    The bundle dir's name is unique per compile (a fresh mkdtemp, or the cache
+    key plus a uuid) and starts with the bundle prefix a profiler trace's kernel
+    events carry, so records never collide and a trace's kernels can be matched
+    to them. Two files:
 
-    A measurement must never fail the compile, so an unwritable directory is
-    logged and otherwise ignored.
+    ``dbo-opt.timing.rank<rank>.txt``  the report as dbo-opt printed it.
+    ``dbo-opt.span.rank<rank>.json``   when the run started and ended (see
+                                       ``_BackendRunClock``), the kernel, the
+                                       bundle dir, and the pid of the process
+                                       that ran dbo-opt (a compile-pool worker,
+                                       or this process when inline).
+
+    A measurement must never fail the compile, so a failure to write is logged
+    and otherwise ignored.
     """
+    out_dir = os.path.join(timing_dir, os.path.basename(os.path.normpath(bundle_dir)))
+    span = {
+        "start_ns": clock.start_ns,
+        "end_ns": clock.end_ns,
+        "duration_ns": clock.duration_ns,
+        "kernel": kernel_name,
+        "bundle_dir": bundle_dir,
+        "pid": os.getpid(),
+    }
     try:
-        report_path = os.path.join(out_dir, PASS_TIMING_REPORT_FILE.format(rank=rank))
-        with open(report_path, "w") as fh:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"dbo-opt.timing.rank{rank}.txt"), "w") as fh:
             fh.write(report)
-        span_path = os.path.join(out_dir, PASS_TIMING_SPAN_FILE.format(rank=rank))
-        with open(span_path, "w") as fh:
-            json.dump({"start_ns": start_ns, "end_ns": end_ns, "pid": os.getpid()}, fh)
+        with open(os.path.join(out_dir, f"dbo-opt.span.rank{rank}.json"), "w") as fh:
+            json.dump(span, fh)
     except OSError as exc:
         logger.warning("dbo-opt pass timing not saved in %s: %s", out_dir, exc)
 
@@ -290,7 +339,7 @@ def _run_backend_compiler(
     backend_loop_unroll: bool,
     ktir_device_mlir: str,
     timeout: float | None,
-    pass_timing: bool = False,
+    pass_timing_dir: str | None = None,
 ) -> str:
     """Compile one materialized bundle with dbo-opt and return its directory.
 
@@ -306,8 +355,8 @@ def _run_backend_compiler(
     ``ktir_device_mlir`` is the same parent-side device override used for the key.
     ``timeout`` is likewise resolved in the parent (``_backend_compile_timeout``)
     so a runtime config change reaches pool workers too.
-    ``pass_timing`` is the parent's ``backend_pass_timing``: when set, dbo-opt
-    runs with MLIR pass timing and the report is saved beside the bundle (see
+    ``pass_timing_dir`` is the parent's ``_backend_pass_timing_dir()``: when not
+    None, dbo-opt runs with MLIR pass timing and the run is recorded there (see
     ``_save_backend_pass_timing``), under the ``RANK`` in ``env`` (default 0).
     """
     _check_backend_compiler_on_path()
@@ -322,7 +371,7 @@ def _run_backend_compiler(
     # Always pass the resolved value, including the default, so compilation
     # matches the cache key instead of depending on dbo-opt's own default.
     cmd.append(f"--enable-loop-unroll={int(backend_loop_unroll)}")
-    if pass_timing:
+    if pass_timing_dir is not None:
         cmd += _PASS_TIMING_FLAGS
     cmd += [
         f"--export-dir={compile_dir}",
@@ -338,7 +387,7 @@ def _run_backend_compiler(
             # before -- left uncaptured, every kernel dumps its whole bundle
             # module into the user's terminal.  Capturing also makes the
             # compiler's own diagnostics available to the error paths below.
-            start_ns = time.time_ns()
+            clock = _BackendRunClock()
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -347,7 +396,7 @@ def _run_backend_compiler(
                 env=env,
                 timeout=timeout,
             )
-            end_ns = time.time_ns()
+            clock.stop()
             # The KTIR path (#3651) reports that dbo-opt can exit 0 having
             # written nothing, so treat the artifact -- not the return code --
             # as the success condition. Not independently confirmed for the
@@ -359,9 +408,14 @@ def _run_backend_compiler(
                     f"command: {' '.join(cmd)}\n"
                     f"stderr:\n{proc.stderr}"
                 )
-            if pass_timing:
+            if pass_timing_dir is not None:
                 _save_backend_pass_timing(
-                    compile_dir, env.get("RANK", "0"), proc.stderr, start_ns, end_ns
+                    pass_timing_dir,
+                    compile_dir,
+                    kernel_name,
+                    env.get("RANK", "0"),
+                    proc.stderr,
+                    clock,
                 )
         except subprocess.TimeoutExpired as exc:
             # Would otherwise land in the broad handler below, which collects
@@ -534,7 +588,7 @@ class SpyreAsyncCompile(AsyncCompile):
         )
         # Resolved here, in the parent, like the other settings: workers do not
         # re-read config.
-        pass_timing = _spyre_config.backend_pass_timing
+        pass_timing_dir = _backend_pass_timing_dir()
         if get_compile_threads() > 1:
             # The first use creates the pool and submits its readiness probe.
             # Waiting for that short probe guarantees the first Spyre kernel is
@@ -549,7 +603,7 @@ class SpyreAsyncCompile(AsyncCompile):
                     backend_loop_unroll,
                     ktir_device_mlir,
                     timeout,
-                    pass_timing,
+                    pass_timing_dir,
                 )
 
         with timing_recorder.stage(_BACKEND_STAGE, kernel=kernel_name, tool="dbo-opt"):
@@ -560,7 +614,7 @@ class SpyreAsyncCompile(AsyncCompile):
                 backend_loop_unroll,
                 ktir_device_mlir,
                 timeout,
-                pass_timing,
+                pass_timing_dir,
             )
         return None
 
@@ -911,9 +965,9 @@ class SpyreAsyncCompile(AsyncCompile):
         cmd = ["dbo-opt", "--from-ktir"]
         if _spyre_config.ktir_device_mlir:
             cmd.append(f"--device={_spyre_config.ktir_device_mlir}")
-        # This path runs in the parent, so config is read directly.
-        pass_timing = _spyre_config.backend_pass_timing
-        if pass_timing:
+        # This path runs in the parent, so the setting is resolved directly.
+        pass_timing_dir = _backend_pass_timing_dir()
+        if pass_timing_dir is not None:
             cmd += _PASS_TIMING_FLAGS
         cmd += [
             f"--export-dir={output_dir}",
@@ -933,7 +987,7 @@ class SpyreAsyncCompile(AsyncCompile):
                 with timing_recorder.stage(
                     _BACKEND_STAGE, kernel=kernel_name, tool="dbo-opt"
                 ):
-                    start_ns = time.time_ns()
+                    clock = _BackendRunClock()
                     proc = subprocess.run(
                         cmd,
                         capture_output=True,
@@ -941,7 +995,7 @@ class SpyreAsyncCompile(AsyncCompile):
                         check=True,
                         timeout=timeout,
                     )
-                    end_ns = time.time_ns()
+                    clock.stop()
                 # dbo-opt can exit 0 having written nothing, so the artifact
                 # itself -- not the return code -- is the success condition.
                 spyrecode = os.path.join(output_dir, "spyreCodeDir", "spyrecode.json")
@@ -951,13 +1005,14 @@ class SpyreAsyncCompile(AsyncCompile):
                         f"{spyrecode}.\ncommand: {' '.join(cmd)}\n"
                         f"stderr:\n{proc.stderr}"
                     )
-                if pass_timing:
+                if pass_timing_dir is not None:
                     _save_backend_pass_timing(
+                        pass_timing_dir,
                         output_dir,
+                        kernel_name,
                         os.environ.get("RANK", "0"),
                         proc.stderr,
-                        start_ns,
-                        end_ns,
+                        clock,
                     )
             except subprocess.TimeoutExpired as exc:
                 # Would otherwise land in the broad handler below, which collects

@@ -184,12 +184,13 @@ def _backend_pass_timing_from_env() -> bool:
 
 
 # Debug aid: run each dbo-opt with MLIR pass timing (``--mlir-timing
-# --mlir-timing-display=tree``) and save, beside the kernel's bundle, the report
-# as ``dbo-opt.timing.rank<RANK>.txt`` and the run's start/end (epoch ns, the
-# profiler trace's clock) as ``dbo-opt.span.rank<RANK>.json``. Covers both the
-# SDSC bundle and KTIR paths. A kernel-cache hit runs no dbo-opt and writes
-# nothing. Off by default; it does not change the compiled code, so it is left
-# out of the cache key.
+# --mlir-timing-display=tree``) and record each run under
+# ``<Inductor cache dir>/spyre-pass-timing/<bundle dir name>/``: the report as
+# ``dbo-opt.timing.rank<RANK>.txt`` and the run's start, end and duration as
+# ``dbo-opt.span.rank<RANK>.json``. Covers both the SDSC bundle and KTIR paths.
+# Records are kept outside the Spyre kernel cache, so cache entries stay as they
+# were; a kernel-cache hit runs no dbo-opt and records nothing. Off by default;
+# it does not change the compiled code, so it is left out of the cache key.
 backend_pass_timing: bool = _backend_pass_timing_from_env()
 
 # Enable certified LX ownership changes: movement, exact fused-axis views,

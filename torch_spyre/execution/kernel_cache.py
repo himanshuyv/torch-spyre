@@ -963,9 +963,8 @@ def commit_compile_dir(tmp_dir: str, cache_key: str) -> str:
     if os.path.isdir(cached_dir):
         # Another process/thread won the race — discard our copy, but first
         # merge our recorded kernel names into the winner's file so no name
-        # is lost, and keep our pass-timing files if there are any.
+        # is lost.
         _merge_kernel_names(tmp_dir, cached_dir)
-        _merge_backend_pass_timing(tmp_dir, cached_dir)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.info("Cache race resolved: reusing existing entry at %s", cached_dir)
         return cached_dir
@@ -975,43 +974,10 @@ def commit_compile_dir(tmp_dir: str, cache_key: str) -> str:
         logger.info("Saved compiled kernel to cache: %s", cached_dir)
     except OSError:
         _merge_kernel_names(tmp_dir, cached_dir)
-        _merge_backend_pass_timing(tmp_dir, cached_dir)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.info("Cache race resolved: reusing existing entry at %s", cached_dir)
 
     return cached_dir
-
-
-# Written beside a bundle under SPYRE_BACKEND_PASS_TIMING (see
-# ``_save_backend_pass_timing`` in async_compile): one pass-timing report and
-# one process span per rank that ran dbo-opt for the kernel.
-PASS_TIMING_REPORT_FILE = "dbo-opt.timing.rank{rank}.txt"
-PASS_TIMING_SPAN_FILE = "dbo-opt.span.rank{rank}.json"
-_PASS_TIMING_PREFIXES = tuple(
-    name.split("{", 1)[0] for name in (PASS_TIMING_REPORT_FILE, PASS_TIMING_SPAN_FILE)
-)
-
-
-def _merge_backend_pass_timing(tmp_dir: str, cached_dir: str) -> None:
-    """Copy the race loser's pass-timing files into the winner's cache entry.
-
-    Ranks compiling the same kernel each run dbo-opt into their own temp dir,
-    and only one dir is kept; without this the other ranks' measurements
-    would be deleted with it. A file the winner already has (the same rank)
-    is left alone. Never raises: losing a measurement must not fail a compile.
-    """
-    try:
-        names = [n for n in os.listdir(tmp_dir) if n.startswith(_PASS_TIMING_PREFIXES)]
-    except OSError:
-        return
-    for name in names:
-        dst = os.path.join(cached_dir, name)
-        if os.path.exists(dst):
-            continue
-        try:
-            shutil.copy2(os.path.join(tmp_dir, name), dst)
-        except OSError as e:
-            logger.debug("Could not keep %s from %s: %s", name, tmp_dir, e)
 
 
 def _merge_kernel_names(tmp_dir: str, cached_dir: str) -> None:
