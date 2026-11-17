@@ -254,7 +254,8 @@ figures.
 ### Timing the backend's passes
 
 `TORCH_SPYRE_TIMING` times `dbo-opt` as one region per kernel. To see what
-it spends that time on, set `SPYRE_BACKEND_PASS_TIMING=1`: each `dbo-opt` then
+it spends that time on, set `SPYRE_BACKEND_PASS_TIMING=1` (`1`/`true`/`yes`
+or `0`/`false`/`no`; anything else is an error): each `dbo-opt` then
 runs with MLIR's pass timing (`--mlir-timing --mlir-timing-display=tree`), and
 two files are written beside the kernel's bundle:
 
@@ -265,16 +266,22 @@ two files are written beside the kernel's bundle:
   `baseTimeNanoseconds + ts` is on, so a run can be placed on the trace's
   timeline even though it ran in a compile-pool worker the profiler cannot see.
 
-`RANK` is the variable `torchrun` sets (`0` when unset), so ranks sharing a
-cache directory do not overwrite each other's reports. A kernel-cache hit runs
-no `dbo-opt` and writes nothing, so measure with a cold cache. The setting does
-not change the compiled code and is not part of the cache key.
+`RANK` is the variable `torchrun` sets (`0` when unset): it says which rank
+ran that `dbo-opt`, so a multi-rank run's reports can be told apart. The
+setting does not change the compiled code and is not part of the cache key.
+
+With the Spyre kernel cache on (`SPYRE_KERNEL_CACHE=1`), the files are kept
+in the cache entry. When ranks compile the same kernel, each rank's files are
+kept there, side by side. A later cache hit runs no `dbo-opt` and writes
+nothing, but the entry still holds the files from the run that compiled it:
+measure with a cold cache, and match a report to a run by its span.
 
 The report has durations but no start times. When `dbo-opt` compiles a
 bundle's programs in parallel, it gives each its own pass manager, which the
 timing does not reach, so `dbo-run-program-pipelines` appears as one row.
-`DT_PARALLEL_THREADS=1` compiles them serially, and their passes then appear
-nested under it.
+`DT_PARALLEL_THREADS=1` compiles the programs serially, through the pass's
+own pipeline, which should nest their passes under it -- at the cost of
+timing a serial compile rather than the parallel one.
 
 ## FFDC (First Failure Data Capture)
 

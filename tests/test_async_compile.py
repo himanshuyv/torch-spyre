@@ -16,6 +16,7 @@
 
 from concurrent.futures import Future
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -176,13 +177,31 @@ def test_backend_compiler_forwards_loop_unroll_control(tmp_path, unroll, timeout
     assert run.call_args.kwargs["timeout"] == timeout
 
 
-@pytest.mark.parametrize("value,expected", [(None, False), ("0", False), ("1", True)])
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, False),
+        ("0", False),
+        ("false", False),
+        (" NO ", False),
+        ("1", True),
+        ("TRUE", True),
+        ("yes", True),
+    ],
+)
 def test_backend_pass_timing_environment(monkeypatch, value, expected):
     if value is None:
         monkeypatch.delenv("SPYRE_BACKEND_PASS_TIMING", raising=False)
     else:
         monkeypatch.setenv("SPYRE_BACKEND_PASS_TIMING", value)
     assert _load_config(monkeypatch).backend_pass_timing is expected
+
+
+@pytest.mark.parametrize("value", ["", "2", "on"])
+def test_backend_pass_timing_rejects_invalid_environment(monkeypatch, value):
+    monkeypatch.setenv("SPYRE_BACKEND_PASS_TIMING", value)
+    with pytest.raises(ValueError, match="SPYRE_BACKEND_PASS_TIMING must be"):
+        _load_config(monkeypatch)
 
 
 _PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
@@ -198,6 +217,10 @@ def _compiled_dir(tmp_path: Path) -> Path:
 
 
 def _run_with_pass_timing(compile_dir: Path, env, pass_timing, stderr=_TIMING_REPORT):
+    # ``time`` is the process-wide module, so anything else that reads the
+    # clock while this is patched (logging does on Python 3.13+) also draws from
+    # it: an endless clock rather than a fixed list, and tests compare the
+    # difference, which only the two reads around subprocess.run decide.
     with (
         patch.object(async_compile_mod, "_check_backend_compiler_on_path"),
         patch.object(
@@ -205,7 +228,9 @@ def _run_with_pass_timing(compile_dir: Path, env, pass_timing, stderr=_TIMING_RE
             "run",
             return_value=MagicMock(stderr=stderr),
         ) as run,
-        patch.object(async_compile_mod.time, "time_ns", side_effect=[100, 250]),
+        patch.object(
+            async_compile_mod.time, "time_ns", side_effect=itertools.count(100, 150)
+        ),
     ):
         async_compile_mod._run_backend_compiler(
             "kernel", str(compile_dir), env, True, "", 60.0, pass_timing
@@ -234,7 +259,7 @@ def test_backend_pass_timing_saves_report_and_span(tmp_path, env, rank):
     span = compile_dir / f"dbo-opt.span.rank{rank}.json"
     assert report.read_text() == _TIMING_REPORT
     recorded = json.loads(span.read_text())
-    assert (recorded["start_ns"], recorded["end_ns"]) == (100, 250)
+    assert recorded["end_ns"] - recorded["start_ns"] == 150
     assert recorded["pid"] == os.getpid()
 
 

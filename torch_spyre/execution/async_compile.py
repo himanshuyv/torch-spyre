@@ -48,6 +48,8 @@ from .kernel_runner import (
     SpyreUnimplementedRunner,
 )
 from .kernel_cache import (
+    PASS_TIMING_REPORT_FILE,
+    PASS_TIMING_SPAN_FILE,
     PrecomputedKernelKeyMismatch,
     allocate_compile_dir,
     commit_compile_dir,
@@ -261,17 +263,21 @@ def _save_backend_pass_timing(
     """Write one dbo-opt run's pass-timing report and process span to out_dir.
 
     ``dbo-opt.timing.rank<rank>.txt`` holds the report as dbo-opt printed it.
-    ``dbo-opt.span.rank<rank>.json`` holds when the process started and ended,
-    in epoch nanoseconds, the clock a profiler trace's ``baseTimeNanoseconds +
-    ts`` is on, so a run can be placed on the trace's timeline.
+    ``dbo-opt.span.rank<rank>.json`` holds when the run started and ended, in
+    epoch nanoseconds, the clock a profiler trace's ``baseTimeNanoseconds +
+    ts`` is on, so a run can be placed on the trace's timeline. Its ``pid`` is
+    the process that ran dbo-opt -- a compile-pool worker, or this process
+    when compiling inline -- not dbo-opt's own.
 
     A measurement must never fail the compile, so an unwritable directory is
     logged and otherwise ignored.
     """
     try:
-        with open(os.path.join(out_dir, f"dbo-opt.timing.rank{rank}.txt"), "w") as fh:
+        report_path = os.path.join(out_dir, PASS_TIMING_REPORT_FILE.format(rank=rank))
+        with open(report_path, "w") as fh:
             fh.write(report)
-        with open(os.path.join(out_dir, f"dbo-opt.span.rank{rank}.json"), "w") as fh:
+        span_path = os.path.join(out_dir, PASS_TIMING_SPAN_FILE.format(rank=rank))
+        with open(span_path, "w") as fh:
             json.dump({"start_ns": start_ns, "end_ns": end_ns, "pid": os.getpid()}, fh)
     except OSError as exc:
         logger.warning("dbo-opt pass timing not saved in %s: %s", out_dir, exc)

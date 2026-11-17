@@ -839,7 +839,8 @@ Environment Variables
        --mlir-timing-display=tree``) and save, beside the kernel's bundle,
        the report as ``dbo-opt.timing.rank<RANK>.txt`` and the process's
        start and end (epoch ns) as ``dbo-opt.span.rank<RANK>.json``. Debug
-       aid; default ``0``, and not part of the cache key
+       aid; ``1``/``true``/``yes`` or ``0``/``false``/``no`` (default ``0``),
+       and not part of the cache key
    * - ``ENABLE_LX_CONTEXT_SWITCHING``
      - Bracket opaque ``FallbackKernel`` calls that have no native Spyre
        lowering with per-buffer LX dump and restore clones, so LX-resident
