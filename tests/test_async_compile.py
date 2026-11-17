@@ -208,19 +208,19 @@ _PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
 _TIMING_REPORT = "  Total Execution Time: 1.2345 seconds\n"
 
 
-def _compiled_dir(tmp_path: Path) -> Path:
-    """A compile dir in the state dbo-opt leaves it after a successful run."""
-    code_dir = tmp_path / "spyreCodeDir"
-    code_dir.mkdir()
-    (code_dir / "spyrecode.json").write_text("{}")
-    return tmp_path
+def _compiled_dir(tmp_path: Path, name: str = "abcd1234_sdsc_fused_0_xyz") -> Path:
+    """A bundle dir in the state dbo-opt leaves it after a successful run."""
+    bundle_dir = tmp_path / "cache" / name
+    (bundle_dir / "spyreCodeDir").mkdir(parents=True)
+    (bundle_dir / "spyreCodeDir" / "spyrecode.json").write_text("{}")
+    return bundle_dir
 
 
-def _run_with_pass_timing(compile_dir: Path, env, pass_timing, stderr=_TIMING_REPORT):
-    # ``time`` is the process-wide module, so anything else that reads the
-    # clock while this is patched (logging does on Python 3.13+) also draws from
-    # it: an endless clock rather than a fixed list, and tests compare the
-    # difference, which only the two reads around subprocess.run decide.
+def _run_with_pass_timing(bundle_dir: Path, env, timing_dir, stderr=_TIMING_REPORT):
+    # ``time`` is the process-wide module, so anything else that reads a clock
+    # while this is patched (logging does on Python 3.13+) also draws from it:
+    # endless clocks rather than fixed lists. The monotonic one steps by 150 and
+    # the wall one by 1000, so a duration taken from the wall clock would show.
     with (
         patch.object(async_compile_mod, "_check_backend_compiler_on_path"),
         patch.object(
@@ -229,66 +229,119 @@ def _run_with_pass_timing(compile_dir: Path, env, pass_timing, stderr=_TIMING_RE
             return_value=MagicMock(stderr=stderr),
         ) as run,
         patch.object(
-            async_compile_mod.time, "time_ns", side_effect=itertools.count(100, 150)
+            async_compile_mod.time, "time_ns", side_effect=itertools.count(10**6, 1000)
+        ),
+        patch.object(
+            async_compile_mod.time, "monotonic_ns", side_effect=itertools.count(0, 150)
         ),
     ):
         async_compile_mod._run_backend_compiler(
-            "kernel", str(compile_dir), env, True, "", 60.0, pass_timing
+            "sdsc_fused_0",
+            str(bundle_dir),
+            env,
+            True,
+            "",
+            60.0,
+            None if timing_dir is None else str(timing_dir),
         )
     return run.call_args.args[0]
 
 
+def _records(root: Path) -> list[Path]:
+    return sorted(root.rglob("dbo-opt.*")) if root.exists() else []
+
+
+def test_backend_pass_timing_dir_follows_the_setting(tmp_path):
+    with patch.object(async_compile_mod, "cache_dir", return_value=str(tmp_path)):
+        with spyre_config.patch(backend_pass_timing=False):
+            assert async_compile_mod._backend_pass_timing_dir() is None
+        with spyre_config.patch(backend_pass_timing=True):
+            assert async_compile_mod._backend_pass_timing_dir() == str(
+                tmp_path / "spyre-pass-timing"
+            )
+
+
 def test_backend_pass_timing_off_adds_no_flags_and_writes_nothing(tmp_path):
-    compile_dir = _compiled_dir(tmp_path)
-    cmd = _run_with_pass_timing(compile_dir, {"RANK": "0"}, pass_timing=False)
+    bundle_dir = _compiled_dir(tmp_path)
+    cmd = _run_with_pass_timing(bundle_dir, {"RANK": "0"}, timing_dir=None)
     assert not set(_PASS_TIMING_FLAGS) & set(cmd)
-    assert not list(compile_dir.glob("dbo-opt.*"))
+    assert _records(tmp_path) == []
 
 
 @pytest.mark.parametrize("env,rank", [({}, "0"), ({"RANK": "3"}, "3")])
-def test_backend_pass_timing_saves_report_and_span(tmp_path, env, rank):
-    """The flags reach dbo-opt, and its stderr report and process span are
-    written beside the bundle under the worker environment's RANK."""
-    compile_dir = _compiled_dir(tmp_path)
-    cmd = _run_with_pass_timing(compile_dir, env, pass_timing=True)
+def test_backend_pass_timing_records_outside_the_bundle(tmp_path, env, rank):
+    """The flags reach dbo-opt; the report and span go to the timing dir, under
+    the bundle dir's name and the worker environment's RANK, and the bundle dir
+    (which may become a kernel-cache entry) is left as dbo-opt left it."""
+    bundle_dir = _compiled_dir(tmp_path)
+    timing_dir = tmp_path / "timing"
+    cmd = _run_with_pass_timing(bundle_dir, env, timing_dir)
 
     # Options, so before the positional bundle path.
     for flag in _PASS_TIMING_FLAGS:
-        assert cmd.index(flag) < cmd.index(str(compile_dir / "bundle.mlir"))
-    report = compile_dir / f"dbo-opt.timing.rank{rank}.txt"
-    span = compile_dir / f"dbo-opt.span.rank{rank}.json"
-    assert report.read_text() == _TIMING_REPORT
-    recorded = json.loads(span.read_text())
-    assert recorded["end_ns"] - recorded["start_ns"] == 150
-    assert recorded["pid"] == os.getpid()
+        assert cmd.index(flag) < cmd.index(str(bundle_dir / "bundle.mlir"))
+    out = timing_dir / bundle_dir.name
+    assert _records(tmp_path) == [
+        out / f"dbo-opt.span.rank{rank}.json",
+        out / f"dbo-opt.timing.rank{rank}.txt",
+    ]
+    assert (out / f"dbo-opt.timing.rank{rank}.txt").read_text() == _TIMING_REPORT
+    span = json.loads((out / f"dbo-opt.span.rank{rank}.json").read_text())
+    assert span["duration_ns"] == 150  # monotonic, not the wall clock's step
+    assert span["start_ns"] < span["end_ns"]
+    assert span["kernel"] == "sdsc_fused_0"
+    assert span["bundle_dir"] == str(bundle_dir)
+    assert span["pid"] == os.getpid()
+
+
+def test_backend_pass_timing_runs_do_not_overwrite_each_other(tmp_path):
+    """Two compiles of the same kernel (two ranks racing for one cache key, or
+    a recompile) have distinct bundle dirs, so each keeps its own record."""
+    timing_dir = tmp_path / "timing"
+    first = _compiled_dir(tmp_path, "key.tmp.aaaa")
+    second = _compiled_dir(tmp_path, "key.tmp.bbbb")
+    _run_with_pass_timing(first, {"RANK": "0"}, timing_dir, stderr="first\n")
+    _run_with_pass_timing(second, {"RANK": "1"}, timing_dir, stderr="second\n")
+    assert (timing_dir / "key.tmp.aaaa" / "dbo-opt.timing.rank0.txt").read_text() == (
+        "first\n"
+    )
+    assert (timing_dir / "key.tmp.bbbb" / "dbo-opt.timing.rank1.txt").read_text() == (
+        "second\n"
+    )
 
 
 def test_backend_pass_timing_unwritable_dir_does_not_fail_compile(tmp_path):
-    compile_dir = _compiled_dir(tmp_path)
-    # A directory where the report file would go makes open() fail.
-    (compile_dir / "dbo-opt.timing.rank0.txt").mkdir()
+    bundle_dir = _compiled_dir(tmp_path)
+    # A file where the timing dir would go makes makedirs() fail.
+    timing_dir = tmp_path / "timing"
+    timing_dir.write_text("not a directory")
     with patch.object(async_compile_mod, "logger") as logger:
-        _run_with_pass_timing(compile_dir, {}, pass_timing=True)
+        _run_with_pass_timing(bundle_dir, {}, timing_dir)
     logger.warning.assert_called_once()
     assert "pass timing not saved" in logger.warning.call_args.args[0]
 
 
 def test_backend_pass_timing_not_saved_for_a_failed_compile(tmp_path):
-    """dbo-opt exiting 0 without spyrecode.json is a failure: no report."""
+    """dbo-opt exiting 0 without spyrecode.json is a failure: no record."""
+    bundle_dir = tmp_path / "cache" / "abcd1234_sdsc_fused_0_xyz"
+    bundle_dir.mkdir(parents=True)
     with pytest.raises(RuntimeError, match="wrote no"):
-        _run_with_pass_timing(tmp_path, {}, pass_timing=True)
-    assert not list(tmp_path.glob("dbo-opt.*"))
+        _run_with_pass_timing(bundle_dir, {}, tmp_path / "timing")
+    assert _records(tmp_path) == []
 
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("threads", [1, 2])
-def test_backend_pass_timing_is_forwarded_to_the_backend_compile(enabled, threads):
+def test_backend_pass_timing_is_forwarded_to_the_backend_compile(
+    tmp_path, enabled, threads
+):
     """Resolved in the parent and passed down, inline or to a pool worker."""
     pool = _RecordingPool()
     compiler = async_compile_mod.SpyreAsyncCompile()
     with (
         torch._inductor.config.patch({"compile_threads": threads}),
         spyre_config.patch(backend_pass_timing=enabled),
+        patch.object(async_compile_mod, "cache_dir", return_value=str(tmp_path)),
         patch.object(compiler, "wait_pool_ready"),
         patch.object(compiler, "use_process_pool", return_value=True),
         patch.object(compiler, "process_pool", return_value=pool),
@@ -302,7 +355,8 @@ def test_backend_pass_timing_is_forwarded_to_the_backend_compile(enabled, thread
             timeout=60.0,
         )
     args = pool.calls[-1][1] if threads > 1 else compile_backend.call_args.args
-    assert args[6] is enabled
+    expected = str(tmp_path / "spyre-pass-timing") if enabled else None
+    assert args[6] == expected
 
 
 @pytest.mark.parametrize("unroll", [False, True])
@@ -339,7 +393,7 @@ def test_single_worker_compiles_inline_without_starting_pool(unroll):
         unroll,
         "/parent/device.mlir",
         123.0,
-        False,
+        None,
     )
 
 
@@ -496,7 +550,7 @@ def test_async_cache_commit_is_deferred_until_wait():
             False,
             "/parent/device.mlir",
             123.0,
-            False,
+            None,
         )
         commit.assert_not_called()
 

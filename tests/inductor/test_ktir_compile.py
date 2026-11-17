@@ -249,6 +249,15 @@ class TestKtirDboSuccess(_PrereqCase):
             args=["dbo-opt"], returncode=0, stdout="", stderr="REPORT\n"
         )
 
+    def _timing_dir(self):
+        return os.path.join(self.output_dir, "timing")
+
+    def _records(self):
+        found = []
+        for root, _, files in os.walk(self.output_dir):
+            found += [os.path.join(root, f) for f in files if f.startswith("dbo-opt.")]
+        return found
+
     def test_pass_timing_off_adds_no_flags_and_writes_nothing(self):
         with (
             mock.patch(f"{_CONFIG}.backend_pass_timing", False),
@@ -260,14 +269,13 @@ class TestKtirDboSuccess(_PrereqCase):
         ):
             self.compile()
         self.assertNotIn("--mlir-timing", run.call_args[0][0])
-        self.assertFalse(
-            [f for f in os.listdir(self.output_dir) if f.startswith("dbo-opt.")]
-        )
+        self.assertEqual(self._records(), [])
 
-    def test_pass_timing_saves_report_and_span(self):
+    def test_pass_timing_records_outside_the_bundle(self):
         """KTIR runs dbo-opt in this process, so RANK comes from os.environ."""
         with (
             mock.patch(f"{_CONFIG}.backend_pass_timing", True),
+            mock.patch(f"{_MODULE}.cache_dir", return_value=self._timing_dir()),
             mock.patch.dict(os.environ, {"RANK": "2"}),
             mock.patch(f"{_MODULE}.SpyreSDSCKernelRunner"),
             mock.patch(
@@ -282,11 +290,23 @@ class TestKtirDboSuccess(_PrereqCase):
         self.assertEqual(cmd[-1], self.ktir_path)
         self.assertIn("--mlir-timing", cmd)
         self.assertIn("--mlir-timing-display=tree", cmd)
-        with open(os.path.join(self.output_dir, "dbo-opt.timing.rank2.txt")) as fh:
+        out = os.path.join(
+            self._timing_dir(), "spyre-pass-timing", os.path.basename(self.output_dir)
+        )
+        self.assertEqual(
+            sorted(self._records()),
+            [
+                os.path.join(out, "dbo-opt.span.rank2.json"),
+                os.path.join(out, "dbo-opt.timing.rank2.txt"),
+            ],
+        )
+        with open(os.path.join(out, "dbo-opt.timing.rank2.txt")) as fh:
             self.assertEqual(fh.read(), "REPORT\n")
-        with open(os.path.join(self.output_dir, "dbo-opt.span.rank2.json")) as fh:
+        with open(os.path.join(out, "dbo-opt.span.rank2.json")) as fh:
             span = json.load(fh)
-        self.assertLessEqual(span["start_ns"], span["end_ns"])
+        self.assertEqual(span["kernel"], "ktir_fused_add_0")
+        self.assertEqual(span["bundle_dir"], self.output_dir)
+        self.assertGreaterEqual(span["duration_ns"], 0)
 
     def test_timeout_comes_from_config(self):
         for configured, expected in ((90.0, 90.0), (0.0, None)):
