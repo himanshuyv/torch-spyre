@@ -298,6 +298,42 @@ class TestAtomicCommit(unittest.TestCase):
                 names = f.read().splitlines()
             self.assertEqual(sorted(names), ["kernel_loser", "kernel_winner"])
 
+    def test_race_loser_pass_timing_is_kept(self):
+        """Two ranks compile the same key; the loser's pass timing survives."""
+        fake_key = "e" + "b" * 63
+
+        def write(kernel_dir, name, content):
+            with open(os.path.join(kernel_dir, name), "w") as f:
+                f.write(content)
+
+        with fresh_cache():
+            winner = allocate_compile_dir(fake_key)
+            loser = allocate_compile_dir(fake_key)
+            write(winner, "dbo-opt.timing.rank0.txt", "rank 0 report")
+            write(winner, "dbo-opt.span.rank0.json", "{}")
+            write(loser, "dbo-opt.timing.rank1.txt", "rank 1 report")
+            write(loser, "dbo-opt.span.rank1.json", "{}")
+            # Same rank in both: the winner's file is the one kept.
+            write(loser, "dbo-opt.timing.rank0.txt", "loser's rank 0 report")
+
+            committed = commit_compile_dir(winner, fake_key)
+            commit_compile_dir(loser, fake_key)
+
+            self.assertEqual(
+                sorted(n for n in os.listdir(committed) if n.startswith("dbo-opt.")),
+                [
+                    "dbo-opt.span.rank0.json",
+                    "dbo-opt.span.rank1.json",
+                    "dbo-opt.timing.rank0.txt",
+                    "dbo-opt.timing.rank1.txt",
+                ],
+            )
+            with open(os.path.join(committed, "dbo-opt.timing.rank0.txt")) as f:
+                self.assertEqual(f.read(), "rank 0 report")
+            with open(os.path.join(committed, "dbo-opt.timing.rank1.txt")) as f:
+                self.assertEqual(f.read(), "rank 1 report")
+            self.assertFalse(os.path.exists(loser))
+
 
 class TestNoDiskIOOnCacheHit(unittest.TestCase):
     def test_generate_bundle_skipped_on_cache_hit(self):

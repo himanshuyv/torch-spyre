@@ -170,14 +170,27 @@ def _backend_compile_timeout_from_env() -> float:
 
 backend_compile_timeout_seconds: float = _backend_compile_timeout_from_env()
 
+
+def _backend_pass_timing_from_env() -> bool:
+    value = os.environ.get("SPYRE_BACKEND_PASS_TIMING", "0")
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes"):
+        return True
+    if normalized in ("0", "false", "no"):
+        return False
+    raise ValueError(
+        f"SPYRE_BACKEND_PASS_TIMING must be 1/true/yes or 0/false/no, got {value!r}"
+    )
+
+
 # Debug aid: run each dbo-opt with MLIR pass timing (``--mlir-timing
 # --mlir-timing-display=tree``) and save, beside the kernel's bundle, the report
-# as ``dbo-opt.timing.rank<RANK>.txt`` and the process's start/end (epoch ns, the
+# as ``dbo-opt.timing.rank<RANK>.txt`` and the run's start/end (epoch ns, the
 # profiler trace's clock) as ``dbo-opt.span.rank<RANK>.json``. Covers both the
 # SDSC bundle and KTIR paths. A kernel-cache hit runs no dbo-opt and writes
 # nothing. Off by default; it does not change the compiled code, so it is left
 # out of the cache key.
-backend_pass_timing: bool = os.environ.get("SPYRE_BACKEND_PASS_TIMING", "0") == "1"
+backend_pass_timing: bool = _backend_pass_timing_from_env()
 
 # Enable certified LX ownership changes: movement, exact fused-axis views,
 # consumer-compatible producer order, and same-core restickify residency.
