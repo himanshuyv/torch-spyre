@@ -23,7 +23,6 @@ mocked throughout, so unlike the emitter's golden test this file needs neither
 ``mlir_ktdp`` nor deeptools and runs anywhere.
 """
 
-import json
 import os
 import subprocess
 import tempfile
@@ -253,37 +252,37 @@ class TestKtirDboSuccess(_PrereqCase):
             self.compile()
         self.assertIsNone(run.call_args[1].get("env"))
 
-    def _run_with_report(self):
+    def _run(self):
         self._write_spyrecode()
         return subprocess.CompletedProcess(
-            args=["dbo-opt"], returncode=0, stdout="", stderr="REPORT\n"
+            args=["dbo-opt"], returncode=0, stdout="", stderr=""
         )
 
     def _timing_dir(self):
         return os.path.join(self.output_dir, "timing")
 
-    def _records(self):
-        found = []
-        for root, _, files in os.walk(self.output_dir):
-            found += [os.path.join(root, f) for f in files if f.startswith("dbo-opt.")]
-        return found
-
     def test_pass_timing_off_adds_no_flags_and_writes_nothing(self):
         with (
             mock.patch(f"{_CONFIG}.backend_pass_timing", False),
+            mock.patch(f"{_MODULE}._dbo_opt_supports_pass_trace", return_value=True),
+            mock.patch(f"{_MODULE}.cache_dir", return_value=self._timing_dir()),
             mock.patch(f"{_MODULE}.SpyreSDSCKernelRunner"),
             mock.patch(
-                f"{_MODULE}.subprocess.run",
-                side_effect=lambda *a, **k: self._run_with_report(),
+                f"{_MODULE}.subprocess.run", side_effect=lambda *a, **k: self._run()
             ) as run,
         ):
             self.compile()
-        self.assertNotIn("--mlir-timing", run.call_args[0][0])
-        self.assertEqual(self._records(), [])
+        cmd = run.call_args[0][0]
+        self.assertFalse([a for a in cmd if a.startswith("--dbo-pass-trace-to")])
+        self.assertFalse(os.path.exists(self._timing_dir()))
 
     def test_pass_trace_requested_when_dbo_opt_supports_it(self):
+        """KTIR runs dbo-opt in this process, so RANK comes from os.environ."""
         out = os.path.join(
-            self._timing_dir(), "spyre-pass-timing", os.path.basename(self.output_dir)
+            self._timing_dir(),
+            "spyre-pass-timing",
+            "ktir_fused_add_0",
+            os.path.basename(self.output_dir),
         )
         with (
             mock.patch(f"{_CONFIG}.backend_pass_timing", True),
@@ -292,54 +291,18 @@ class TestKtirDboSuccess(_PrereqCase):
             mock.patch.dict(os.environ, {"RANK": "1"}),
             mock.patch(f"{_MODULE}.SpyreSDSCKernelRunner"),
             mock.patch(
-                f"{_MODULE}.subprocess.run",
-                side_effect=lambda *a, **k: self._run_with_report(),
+                f"{_MODULE}.subprocess.run", side_effect=lambda *a, **k: self._run()
             ) as run,
         ):
             self.compile()
         cmd = run.call_args[0][0]
         trace = os.path.join(out, "dbo-opt.passes.rank1.json")
         self.assertIn(f"--dbo-pass-trace-to={trace}", cmd)
+        self.assertNotIn("--mlir-timing", cmd)
+        # The flag is an option: the frontend switch and the input stay put.
         self.assertEqual(cmd[:2], ["dbo-opt", "--from-ktir"])
         self.assertEqual(cmd[-1], self.ktir_path)
         self.assertTrue(os.path.isdir(out))
-
-    def test_pass_timing_records_outside_the_bundle(self):
-        """KTIR runs dbo-opt in this process, so RANK comes from os.environ."""
-        with (
-            mock.patch(f"{_CONFIG}.backend_pass_timing", True),
-            mock.patch(f"{_MODULE}.cache_dir", return_value=self._timing_dir()),
-            mock.patch.dict(os.environ, {"RANK": "2"}),
-            mock.patch(f"{_MODULE}.SpyreSDSCKernelRunner"),
-            mock.patch(
-                f"{_MODULE}.subprocess.run",
-                side_effect=lambda *a, **k: self._run_with_report(),
-            ) as run,
-        ):
-            self.compile()
-        cmd = run.call_args[0][0]
-        # The flags are options: the frontend switch and the input stay put.
-        self.assertEqual(cmd[:2], ["dbo-opt", "--from-ktir"])
-        self.assertEqual(cmd[-1], self.ktir_path)
-        self.assertIn("--mlir-timing", cmd)
-        self.assertIn("--mlir-timing-display=tree", cmd)
-        out = os.path.join(
-            self._timing_dir(), "spyre-pass-timing", os.path.basename(self.output_dir)
-        )
-        self.assertEqual(
-            sorted(self._records()),
-            [
-                os.path.join(out, "dbo-opt.span.rank2.json"),
-                os.path.join(out, "dbo-opt.timing.rank2.txt"),
-            ],
-        )
-        with open(os.path.join(out, "dbo-opt.timing.rank2.txt")) as fh:
-            self.assertEqual(fh.read(), "REPORT\n")
-        with open(os.path.join(out, "dbo-opt.span.rank2.json")) as fh:
-            span = json.load(fh)
-        self.assertEqual(span["kernel"], "ktir_fused_add_0")
-        self.assertEqual(span["bundle_dir"], self.output_dir)
-        self.assertGreaterEqual(span["duration_ns"], 0)
 
     def test_timeout_comes_from_config(self):
         for configured, expected in ((90.0, 90.0), (0.0, None)):

@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import functools
-import json
 import os
 import shutil
 import subprocess
 import tempfile
-import time
 import uuid
 from collections.abc import Sequence
 from concurrent.futures import Future, TimeoutError as FuturesTimeoutError
@@ -251,23 +249,29 @@ def _compile_to_dir(
     return symbol_kinds
 
 
-# MLIR's own pass timing, printed to stderr when dbo-opt exits. The tree display
-# keeps the pipeline's nesting. See ``backend_pass_timing`` in _inductor/config.
-_PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
+# dbo-opt's own pass trace: when every pass ran, on which thread, written by
+# dbo-opt as Chrome-trace JSON (wall-clock epoch timestamps) when it exits.
+# Newer deeptools only; used when the dbo-opt on PATH has it. See
+# ``backend_pass_timing`` in _inductor/config.
+_PASS_TRACE_FLAG = "--dbo-pass-trace-to"
 # Under the Inductor cache dir, beside (not inside) the Spyre kernel cache: a
 # measurement belongs to the run that made it, not to the reusable kernel.
 _PASS_TIMING_DIRNAME = "spyre-pass-timing"
 
 
-# dbo-opt's own pass trace: when every pass ran, on which thread, written by
-# dbo-opt as Chrome-trace JSON (wall-clock epoch timestamps). Newer deeptools
-# only; used when the dbo-opt on PATH has it.
-_PASS_TRACE_FLAG = "--dbo-pass-trace-to"
+def _pass_timing_record_dir(timing_dir: str, kernel_name: str, bundle_dir: str) -> str:
+    """``timing_dir/<kernel name>/<bundle dir name>``: one dbo-opt run's record.
 
-
-def _pass_timing_record_dir(timing_dir: str, bundle_dir: str) -> str:
-    """``timing_dir/<bundle dir name>``: where one dbo-opt run is recorded."""
-    return os.path.join(timing_dir, os.path.basename(os.path.normpath(bundle_dir)))
+    The kernel name, since the trace does not carry it and a kernel-cache bundle
+    dir is named after its cache key; the bundle dir's name, since it is unique
+    per compile (a fresh mkdtemp, or the cache key plus a uuid), so two ranks
+    racing for one key, or a recompile, never overwrite each other's record.
+    """
+    return os.path.join(
+        timing_dir,
+        _safe_kernel_name(kernel_name),
+        os.path.basename(os.path.normpath(bundle_dir)),
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -276,21 +280,34 @@ def _dbo_opt_supports_pass_trace(dbo_opt: str | None) -> bool:
 
     Probed once per binary per process, from its ``--help``: an older deeptools
     rejects the option as unknown, which would fail every compile. Any failure
-    to probe counts as no.
+    to probe counts as no, and is warned about (once, being cached), since pass
+    timing then records nothing.
     """
-    if not dbo_opt:
-        return False
-    try:
-        proc = subprocess.run(
-            [dbo_opt, "--help"], capture_output=True, text=True, timeout=60
+    supported = False
+    if dbo_opt:
+        try:
+            proc = subprocess.run(
+                [dbo_opt, "--help"], capture_output=True, text=True, timeout=60
+            )
+            supported = isinstance(proc.stdout, str) and _PASS_TRACE_FLAG in proc.stdout
+        except Exception:  # noqa: BLE001 - a probe must not fail the compile
+            pass
+    if not supported:
+        logger.warning(
+            "SPYRE_BACKEND_PASS_TIMING: dbo-opt (%s) has no %s; no pass trace "
+            "is recorded",
+            dbo_opt,
+            _PASS_TRACE_FLAG,
         )
-    except Exception:  # noqa: BLE001 - a probe must not fail the compile
-        return False
-    return isinstance(proc.stdout, str) and _PASS_TRACE_FLAG in proc.stdout
+    return supported
 
 
 def _pass_trace_flags(
-    timing_dir: str, bundle_dir: str, rank: str, path_env: str | None
+    timing_dir: str,
+    kernel_name: str,
+    bundle_dir: str,
+    rank: str,
+    path_env: str | None,
 ) -> list[str]:
     """``[--dbo-pass-trace-to=<record dir>/dbo-opt.passes.rank<rank>.json]``.
 
@@ -300,7 +317,7 @@ def _pass_trace_flags(
     """
     if not _dbo_opt_supports_pass_trace(shutil.which("dbo-opt", path=path_env)):
         return []
-    out_dir = _pass_timing_record_dir(timing_dir, bundle_dir)
+    out_dir = _pass_timing_record_dir(timing_dir, kernel_name, bundle_dir)
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError as exc:
@@ -319,74 +336,6 @@ def _backend_pass_timing_dir() -> str | None:
     if not _spyre_config.backend_pass_timing:
         return None
     return os.path.join(cache_dir(), _PASS_TIMING_DIRNAME)
-
-
-class _BackendRunClock:
-    """Times one dbo-opt run: wall clock to place it, monotonic to size it.
-
-    ``start_ns``/``end_ns`` are epoch nanoseconds, the same wall clock a
-    profiler trace's ``baseTimeNanoseconds + ts`` is expressed in, so a run can
-    be laid on the trace's timeline. ``duration_ns`` comes from the monotonic
-    clock, so a wall-clock step during a compile cannot distort it.
-    """
-
-    def __init__(self) -> None:
-        self.start_ns = time.time_ns()
-        self._t0 = time.monotonic_ns()
-        self.end_ns = self.duration_ns = 0
-
-    def stop(self) -> None:
-        self.duration_ns = time.monotonic_ns() - self._t0
-        self.end_ns = time.time_ns()
-
-
-def _save_backend_pass_timing(
-    timing_dir: str,
-    bundle_dir: str,
-    kernel_name: str,
-    rank: str,
-    report: str,
-    clock: _BackendRunClock,
-) -> None:
-    """Record one dbo-opt run under ``timing_dir/<bundle dir name>/``.
-
-    The bundle dir's name is unique per compile (a fresh mkdtemp, or the cache
-    key plus a uuid) and starts with the bundle prefix a profiler trace's kernel
-    events carry, so records never collide and a trace's kernels can be matched
-    to them. Two files:
-
-    ``dbo-opt.timing.rank<rank>.txt``  the report as dbo-opt printed it.
-    ``dbo-opt.span.rank<rank>.json``   when the run started and ended (see
-                                       ``_BackendRunClock``), the kernel, the
-                                       bundle dir, and the pid of the process
-                                       that ran dbo-opt (a compile-pool worker,
-                                       or this process when inline).
-
-    A third, ``dbo-opt.passes.rank<rank>.json``, is written into the same dir by
-    dbo-opt itself when it supports ``--dbo-pass-trace-to`` (see
-    ``_pass_trace_flags``).
-
-    A measurement must never fail the compile, so any failure to record -- an
-    unwritable dir, or a report that is not text -- is logged and otherwise
-    ignored.
-    """
-    out_dir = _pass_timing_record_dir(timing_dir, bundle_dir)
-    span = {
-        "start_ns": clock.start_ns,
-        "end_ns": clock.end_ns,
-        "duration_ns": clock.duration_ns,
-        "kernel": kernel_name,
-        "bundle_dir": bundle_dir,
-        "pid": os.getpid(),
-    }
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        with open(os.path.join(out_dir, f"dbo-opt.timing.rank{rank}.txt"), "w") as fh:
-            fh.write(report)
-        with open(os.path.join(out_dir, f"dbo-opt.span.rank{rank}.json"), "w") as fh:
-            json.dump(span, fh)
-    except Exception as exc:  # the compile already succeeded; never fail it here
-        logger.warning("dbo-opt pass timing not saved in %s: %s", out_dir, exc)
 
 
 def _run_backend_compiler(
@@ -413,8 +362,8 @@ def _run_backend_compiler(
     ``timeout`` is likewise resolved in the parent (``_backend_compile_timeout``)
     so a runtime config change reaches pool workers too.
     ``pass_timing_dir`` is the parent's ``_backend_pass_timing_dir()``: when not
-    None, dbo-opt runs with MLIR pass timing and the run is recorded there (see
-    ``_save_backend_pass_timing``), under the ``RANK`` in ``env`` (default 0).
+    None, dbo-opt writes its pass trace there (see ``_pass_trace_flags``), under
+    the ``RANK`` in ``env`` (default 0).
     """
     _check_backend_compiler_on_path()
 
@@ -429,9 +378,12 @@ def _run_backend_compiler(
     # matches the cache key instead of depending on dbo-opt's own default.
     cmd.append(f"--enable-loop-unroll={int(backend_loop_unroll)}")
     if pass_timing_dir is not None:
-        cmd += _PASS_TIMING_FLAGS
         cmd += _pass_trace_flags(
-            pass_timing_dir, compile_dir, env.get("RANK", "0"), env.get("PATH")
+            pass_timing_dir,
+            kernel_name,
+            compile_dir,
+            env.get("RANK", "0"),
+            env.get("PATH"),
         )
     cmd += [
         f"--export-dir={compile_dir}",
@@ -447,7 +399,6 @@ def _run_backend_compiler(
             # before -- left uncaptured, every kernel dumps its whole bundle
             # module into the user's terminal.  Capturing also makes the
             # compiler's own diagnostics available to the error paths below.
-            clock = _BackendRunClock()
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -456,7 +407,6 @@ def _run_backend_compiler(
                 env=env,
                 timeout=timeout,
             )
-            clock.stop()
             # The KTIR path (#3651) reports that dbo-opt can exit 0 having
             # written nothing, so treat the artifact -- not the return code --
             # as the success condition. Not independently confirmed for the
@@ -467,15 +417,6 @@ def _run_backend_compiler(
                     f"dbo-opt exited 0 but wrote no {spyrecode}.\n"
                     f"command: {' '.join(cmd)}\n"
                     f"stderr:\n{proc.stderr}"
-                )
-            if pass_timing_dir is not None:
-                _save_backend_pass_timing(
-                    pass_timing_dir,
-                    compile_dir,
-                    kernel_name,
-                    env.get("RANK", "0"),
-                    proc.stderr,
-                    clock,
                 )
         except subprocess.TimeoutExpired as exc:
             # Would otherwise land in the broad handler below, which collects
@@ -1028,9 +969,9 @@ class SpyreAsyncCompile(AsyncCompile):
         # This path runs in the parent, so the setting is resolved directly.
         pass_timing_dir = _backend_pass_timing_dir()
         if pass_timing_dir is not None:
-            cmd += _PASS_TIMING_FLAGS
             cmd += _pass_trace_flags(
                 pass_timing_dir,
+                kernel_name,
                 output_dir,
                 os.environ.get("RANK", "0"),
                 os.environ.get("PATH"),
@@ -1053,7 +994,6 @@ class SpyreAsyncCompile(AsyncCompile):
                 with timing_recorder.stage(
                     _BACKEND_STAGE, kernel=kernel_name, tool="dbo-opt"
                 ):
-                    clock = _BackendRunClock()
                     proc = subprocess.run(
                         cmd,
                         capture_output=True,
@@ -1061,7 +1001,6 @@ class SpyreAsyncCompile(AsyncCompile):
                         check=True,
                         timeout=timeout,
                     )
-                    clock.stop()
                 # dbo-opt can exit 0 having written nothing, so the artifact
                 # itself -- not the return code -- is the success condition.
                 spyrecode = os.path.join(output_dir, "spyreCodeDir", "spyrecode.json")
@@ -1070,15 +1009,6 @@ class SpyreAsyncCompile(AsyncCompile):
                         "OpSpec->KTIR: dbo-opt exited 0 but wrote no "
                         f"{spyrecode}.\ncommand: {' '.join(cmd)}\n"
                         f"stderr:\n{proc.stderr}"
-                    )
-                if pass_timing_dir is not None:
-                    _save_backend_pass_timing(
-                        pass_timing_dir,
-                        output_dir,
-                        kernel_name,
-                        os.environ.get("RANK", "0"),
-                        proc.stderr,
-                        clock,
                     )
             except subprocess.TimeoutExpired as exc:
                 # Would otherwise land in the broad handler below, which collects

@@ -256,45 +256,32 @@ figures.
 `TORCH_SPYRE_TIMING` times `dbo-opt` as one region per kernel. To see what
 it spends that time on, set `SPYRE_BACKEND_PASS_TIMING=1` (`1`/`true`/`yes`
 or `0`/`false`/`no`; anything else is an error): each `dbo-opt` then
-runs with MLIR's pass timing (`--mlir-timing --mlir-timing-display=tree`), and
-the run is recorded under the Inductor cache dir, in
-`spyre-pass-timing/<bundle dir name>/`:
+records every pass it runs, through its `--dbo-pass-trace-to` option, in
 
-- `dbo-opt.timing.rank<RANK>.txt` -- the timing report as `dbo-opt` printed
-  it: wall time per pass, nested as the pipeline is.
-- `dbo-opt.span.rank<RANK>.json` -- `start_ns` and `end_ns` of the run in
-  epoch nanoseconds (wall clock), `duration_ns` (monotonic clock), the kernel
-  name, and the bundle dir. The wall-clock times are what place a run on a
-  profiler trace's timeline (`baseTimeNanoseconds + ts`, also epoch), although
-  it ran in a compile-pool worker the profiler cannot see.
-- `dbo-opt.passes.rank<RANK>.json` -- only when the `dbo-opt` on `PATH` has
-  `--dbo-pass-trace-to` (newer deeptools; checked once per process from its
-  `--help`): `dbo-opt`'s own record of every pass execution, written when it
-  exits, as Chrome-trace events with the thread each pass ran on and its start
-  on the same epoch clock. Unlike the report, it has start times, a separate
-  event for each time a pass runs, and the per-program pipelines that
-  `dbo-run-program-pipelines` runs on worker threads.
+```text
+<Inductor cache dir>/spyre-pass-timing/<kernel>/<bundle dir name>/dbo-opt.passes.rank<RANK>.json
+```
+
+The file is Chrome-trace JSON, written by `dbo-opt` when it exits: one event
+per pass execution, with its start (wall clock, microseconds since the epoch,
+the clock a profiler trace's `baseTimeNanoseconds + ts` is on), its duration
+and the thread it ran on. It includes the per-program pipelines that
+`dbo-run-program-pipelines` runs on worker threads. So although `dbo-opt` runs
+in a compile-pool worker that the profiler cannot see, its passes can be laid
+on the profiler trace's timeline.
+
+The option is in newer deeptools only. Whether the `dbo-opt` on `PATH` has it
+is checked once per process, from its `--help`; when it does not, a warning is
+logged and nothing is recorded.
 
 Each compile has its own bundle dir, so every run gets its own record, even
-when ranks race to compile the same kernel or a kernel is compiled again. The
-dir name starts with the bundle prefix that the trace's kernel events carry as
-`sdsc_bundle_dir_prefix`, which is how a trace's kernels are matched to their
-records. `RANK` is the variable `torchrun` sets (`0` when unset).
-
-Records are kept outside the Spyre kernel cache, so cache entries are never
-changed. A kernel-cache hit runs no `dbo-opt` and records nothing; measure with
-a cold cache. Records accumulate across runs that share a cache dir: tell runs
-apart by their spans. The setting does not change the compiled code and is not
+when ranks race to compile the same kernel or a kernel is compiled again.
+`RANK` is the variable `torchrun` sets (`0` when unset). Records are kept
+outside the Spyre kernel cache, so cache entries are never changed. A
+kernel-cache hit runs no `dbo-opt` and records nothing; measure with a cold
+cache. Records accumulate across runs that share a cache dir: tell runs apart
+by their timestamps. The setting does not change the compiled code and is not
 part of the cache key.
-
-The report has durations but no start times. When `dbo-opt` compiles a
-bundle's programs in parallel, it gives each its own pass manager, which the
-timing does not reach, so `dbo-run-program-pipelines` appears as one row.
-The pass trace (`dbo-opt.passes.rank<RANK>.json`) covers both: it is where to
-look for when each pass ran, and for the passes of each program. Without it,
-`DT_PARALLEL_THREADS=1` compiles the programs serially, through the pass's
-own pipeline, which should nest their passes under it in the report -- at the
-cost of timing a serial compile rather than the parallel one.
 
 ## FFDC (First Failure Data Capture)
 
