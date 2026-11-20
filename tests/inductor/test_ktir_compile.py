@@ -53,13 +53,23 @@ def _prereqs_met():
     ``ktir_device_mlir`` is no longer a prerequisite, but is set here so the
     default case carries the ``--device`` override: the command-line assertions
     below would otherwise be testing the flag's absence by accident.
+
+    ``backend_pass_timing`` is pinned off so a ``SPYRE_BACKEND_PASS_TIMING``
+    in the environment neither changes the command these tests check nor writes
+    records into the real cache dir; the pass-timing tests turn it on themselves.
     """
     settings = {
         "bundle_symbolic_args": False,
         "ktir_device_mlir": "/nonexistent/device.mlir",
+        "backend_pass_timing": False,
     }
     patches = [mock.patch(f"{_CONFIG}.{k}", v) for k, v in settings.items()]
     patches.append(mock.patch(f"{_MODULE}.shutil.which", return_value="/bin/dbo-opt"))
+    # Whether dbo-opt has --dbo-pass-trace-to is fixed, not probed: the probe
+    # would run the mocked subprocess.run, and its result is cached per process.
+    patches.append(
+        mock.patch(f"{_MODULE}._dbo_opt_supports_pass_trace", return_value=False)
+    )
     return patches
 
 
@@ -270,6 +280,29 @@ class TestKtirDboSuccess(_PrereqCase):
             self.compile()
         self.assertNotIn("--mlir-timing", run.call_args[0][0])
         self.assertEqual(self._records(), [])
+
+    def test_pass_trace_requested_when_dbo_opt_supports_it(self):
+        out = os.path.join(
+            self._timing_dir(), "spyre-pass-timing", os.path.basename(self.output_dir)
+        )
+        with (
+            mock.patch(f"{_CONFIG}.backend_pass_timing", True),
+            mock.patch(f"{_MODULE}._dbo_opt_supports_pass_trace", return_value=True),
+            mock.patch(f"{_MODULE}.cache_dir", return_value=self._timing_dir()),
+            mock.patch.dict(os.environ, {"RANK": "1"}),
+            mock.patch(f"{_MODULE}.SpyreSDSCKernelRunner"),
+            mock.patch(
+                f"{_MODULE}.subprocess.run",
+                side_effect=lambda *a, **k: self._run_with_report(),
+            ) as run,
+        ):
+            self.compile()
+        cmd = run.call_args[0][0]
+        trace = os.path.join(out, "dbo-opt.passes.rank1.json")
+        self.assertIn(f"--dbo-pass-trace-to={trace}", cmd)
+        self.assertEqual(cmd[:2], ["dbo-opt", "--from-ktir"])
+        self.assertEqual(cmd[-1], self.ktir_path)
+        self.assertTrue(os.path.isdir(out))
 
     def test_pass_timing_records_outside_the_bundle(self):
         """KTIR runs dbo-opt in this process, so RANK comes from os.environ."""

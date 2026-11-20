@@ -267,6 +267,13 @@ the run is recorded under the Inductor cache dir, in
   name, and the bundle dir. The wall-clock times are what place a run on a
   profiler trace's timeline (`baseTimeNanoseconds + ts`, also epoch), although
   it ran in a compile-pool worker the profiler cannot see.
+- `dbo-opt.passes.rank<RANK>.json` -- only when the `dbo-opt` on `PATH` has
+  `--dbo-pass-trace-to` (newer deeptools; checked once per process from its
+  `--help`): `dbo-opt`'s own record of every pass execution, written when it
+  exits, as Chrome-trace events with the thread each pass ran on and its start
+  on the same epoch clock. Unlike the report, it has start times, a separate
+  event for each time a pass runs, and the per-program pipelines that
+  `dbo-run-program-pipelines` runs on worker threads.
 
 Each compile has its own bundle dir, so every run gets its own record, even
 when ranks race to compile the same kernel or a kernel is compiled again. The
@@ -283,9 +290,11 @@ part of the cache key.
 The report has durations but no start times. When `dbo-opt` compiles a
 bundle's programs in parallel, it gives each its own pass manager, which the
 timing does not reach, so `dbo-run-program-pipelines` appears as one row.
+The pass trace (`dbo-opt.passes.rank<RANK>.json`) covers both: it is where to
+look for when each pass ran, and for the passes of each program. Without it,
 `DT_PARALLEL_THREADS=1` compiles the programs serially, through the pass's
-own pipeline, which should nest their passes under it -- at the cost of
-timing a serial compile rather than the parallel one.
+own pipeline, which should nest their passes under it in the report -- at the
+cost of timing a serial compile rather than the parallel one.
 
 ## FFDC (First Failure Data Capture)
 
