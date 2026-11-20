@@ -838,8 +838,10 @@ Environment Variables
      - Run each ``dbo-opt`` with MLIR pass timing (``--mlir-timing
        --mlir-timing-display=tree``) and record each run under
        ``<Inductor cache dir>/spyre-pass-timing/<bundle dir name>/``: the
-       report as ``dbo-opt.timing.rank<RANK>.txt`` and its start, end and
-       duration as ``dbo-opt.span.rank<RANK>.json``. Debug aid;
+       report as ``dbo-opt.timing.rank<RANK>.txt``, its start, end and
+       duration as ``dbo-opt.span.rank<RANK>.json`` and, with a ``dbo-opt``
+       that has ``--dbo-pass-trace-to``, every pass execution with its start
+       and thread as ``dbo-opt.passes.rank<RANK>.json``. Debug aid;
        ``1``/``true``/``yes`` or ``0``/``false``/``no`` (default ``0``), and
        not part of the cache key
    * - ``ENABLE_LX_CONTEXT_SWITCHING``

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import json
 import os
 import shutil
@@ -258,6 +259,57 @@ _PASS_TIMING_FLAGS = ["--mlir-timing", "--mlir-timing-display=tree"]
 _PASS_TIMING_DIRNAME = "spyre-pass-timing"
 
 
+# dbo-opt's own pass trace: when every pass ran, on which thread, written by
+# dbo-opt as Chrome-trace JSON (wall-clock epoch timestamps). Newer deeptools
+# only; used when the dbo-opt on PATH has it.
+_PASS_TRACE_FLAG = "--dbo-pass-trace-to"
+
+
+def _pass_timing_record_dir(timing_dir: str, bundle_dir: str) -> str:
+    """``timing_dir/<bundle dir name>``: where one dbo-opt run is recorded."""
+    return os.path.join(timing_dir, os.path.basename(os.path.normpath(bundle_dir)))
+
+
+@functools.lru_cache(maxsize=None)
+def _dbo_opt_supports_pass_trace(dbo_opt: str | None) -> bool:
+    """Whether this dbo-opt binary has ``--dbo-pass-trace-to``.
+
+    Probed once per binary per process, from its ``--help``: an older deeptools
+    rejects the option as unknown, which would fail every compile. Any failure
+    to probe counts as no.
+    """
+    if not dbo_opt:
+        return False
+    try:
+        proc = subprocess.run(
+            [dbo_opt, "--help"], capture_output=True, text=True, timeout=60
+        )
+    except Exception:  # noqa: BLE001 - a probe must not fail the compile
+        return False
+    return isinstance(proc.stdout, str) and _PASS_TRACE_FLAG in proc.stdout
+
+
+def _pass_trace_flags(
+    timing_dir: str, bundle_dir: str, rank: str, path_env: str | None
+) -> list[str]:
+    """``[--dbo-pass-trace-to=<record dir>/dbo-opt.passes.rank<rank>.json]``.
+
+    Empty when the dbo-opt on ``path_env`` cannot write a pass trace, or the
+    record dir cannot be made: dbo-opt writes the file there itself when it
+    exits, so the dir has to exist before it runs.
+    """
+    if not _dbo_opt_supports_pass_trace(shutil.which("dbo-opt", path=path_env)):
+        return []
+    out_dir = _pass_timing_record_dir(timing_dir, bundle_dir)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning("dbo-opt pass trace not recorded in %s: %s", out_dir, exc)
+        return []
+    trace = os.path.join(out_dir, f"dbo-opt.passes.rank{rank}.json")
+    return [f"{_PASS_TRACE_FLAG}={trace}"]
+
+
 def _backend_pass_timing_dir() -> str | None:
     """Where pass-timing records go, or None when ``backend_pass_timing`` is off.
 
@@ -310,10 +362,15 @@ def _save_backend_pass_timing(
                                        that ran dbo-opt (a compile-pool worker,
                                        or this process when inline).
 
-    A measurement must never fail the compile, so a failure to write is logged
-    and otherwise ignored.
+    A third, ``dbo-opt.passes.rank<rank>.json``, is written into the same dir by
+    dbo-opt itself when it supports ``--dbo-pass-trace-to`` (see
+    ``_pass_trace_flags``).
+
+    A measurement must never fail the compile, so any failure to record -- an
+    unwritable dir, or a report that is not text -- is logged and otherwise
+    ignored.
     """
-    out_dir = os.path.join(timing_dir, os.path.basename(os.path.normpath(bundle_dir)))
+    out_dir = _pass_timing_record_dir(timing_dir, bundle_dir)
     span = {
         "start_ns": clock.start_ns,
         "end_ns": clock.end_ns,
@@ -328,7 +385,7 @@ def _save_backend_pass_timing(
             fh.write(report)
         with open(os.path.join(out_dir, f"dbo-opt.span.rank{rank}.json"), "w") as fh:
             json.dump(span, fh)
-    except OSError as exc:
+    except Exception as exc:  # the compile already succeeded; never fail it here
         logger.warning("dbo-opt pass timing not saved in %s: %s", out_dir, exc)
 
 
@@ -373,6 +430,9 @@ def _run_backend_compiler(
     cmd.append(f"--enable-loop-unroll={int(backend_loop_unroll)}")
     if pass_timing_dir is not None:
         cmd += _PASS_TIMING_FLAGS
+        cmd += _pass_trace_flags(
+            pass_timing_dir, compile_dir, env.get("RANK", "0"), env.get("PATH")
+        )
     cmd += [
         f"--export-dir={compile_dir}",
         "-kEmitSpyreCode",
@@ -969,6 +1029,12 @@ class SpyreAsyncCompile(AsyncCompile):
         pass_timing_dir = _backend_pass_timing_dir()
         if pass_timing_dir is not None:
             cmd += _PASS_TIMING_FLAGS
+            cmd += _pass_trace_flags(
+                pass_timing_dir,
+                output_dir,
+                os.environ.get("RANK", "0"),
+                os.environ.get("PATH"),
+            )
         cmd += [
             f"--export-dir={output_dir}",
             "--kEmitSpyreCode",

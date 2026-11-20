@@ -216,18 +216,32 @@ def _compiled_dir(tmp_path: Path, name: str = "abcd1234_sdsc_fused_0_xyz") -> Pa
     return bundle_dir
 
 
-def _run_with_pass_timing(bundle_dir: Path, env, timing_dir, stderr=_TIMING_REPORT):
+def _run_with_pass_timing(
+    bundle_dir: Path,
+    env,
+    timing_dir,
+    stderr=_TIMING_REPORT,
+    trace_supported=False,
+    on_run=None,
+):
     # ``time`` is the process-wide module, so anything else that reads a clock
     # while this is patched (logging does on Python 3.13+) also draws from it:
     # endless clocks rather than fixed lists. The monotonic one steps by 150 and
     # the wall one by 1000, so a duration taken from the wall clock would show.
+    # Whether dbo-opt has --dbo-pass-trace-to is fixed per test, not probed.
+    def fake_run(cmd, **kwargs):
+        if on_run is not None:
+            on_run(cmd)
+        return MagicMock(stderr=stderr)
+
     with (
         patch.object(async_compile_mod, "_check_backend_compiler_on_path"),
         patch.object(
-            async_compile_mod.subprocess,
-            "run",
-            return_value=MagicMock(stderr=stderr),
-        ) as run,
+            async_compile_mod,
+            "_dbo_opt_supports_pass_trace",
+            return_value=trace_supported,
+        ),
+        patch.object(async_compile_mod.subprocess, "run", side_effect=fake_run) as run,
         patch.object(
             async_compile_mod.time, "time_ns", side_effect=itertools.count(10**6, 1000)
         ),
@@ -294,6 +308,67 @@ def test_backend_pass_timing_records_outside_the_bundle(tmp_path, env, rank):
     assert span["pid"] == os.getpid()
 
 
+def test_backend_pass_trace_requested_when_dbo_opt_supports_it(tmp_path):
+    """dbo-opt is asked for its pass trace in the run's record dir, which exists
+    before dbo-opt runs, since dbo-opt writes the file there itself."""
+    bundle_dir = _compiled_dir(tmp_path)
+    timing_dir = tmp_path / "timing"
+    out = timing_dir / bundle_dir.name
+    seen = {}
+
+    def on_run(cmd):
+        seen["dir_existed"] = out.is_dir()
+
+    cmd = _run_with_pass_timing(
+        bundle_dir, {"RANK": "2"}, timing_dir, trace_supported=True, on_run=on_run
+    )
+    flag = f"--dbo-pass-trace-to={out / 'dbo-opt.passes.rank2.json'}"
+    assert flag in cmd
+    assert cmd.index(flag) < cmd.index(str(bundle_dir / "bundle.mlir"))
+    assert seen["dir_existed"]
+
+
+@pytest.mark.parametrize("supported,timing_on", [(False, True), (True, False)])
+def test_backend_pass_trace_not_requested(tmp_path, supported, timing_on):
+    """Not when this dbo-opt lacks the option (it would reject it), and never
+    when pass timing is off."""
+    bundle_dir = _compiled_dir(tmp_path)
+    cmd = _run_with_pass_timing(
+        bundle_dir,
+        {},
+        tmp_path / "timing" if timing_on else None,
+        trace_supported=supported,
+    )
+    assert not [a for a in cmd if a.startswith("--dbo-pass-trace-to")]
+
+
+def test_dbo_opt_supports_pass_trace_probe():
+    """Read from --help once per binary; a probe that fails counts as no."""
+    probe = async_compile_mod._dbo_opt_supports_pass_trace
+    help_with = MagicMock(stdout="  --dbo-pass-trace-to=<filename> - Record ...\n")
+    help_without = MagicMock(stdout="  --mlir-timing - Display execution times\n")
+    probe.cache_clear()
+    try:
+        with patch.object(
+            async_compile_mod.subprocess, "run", return_value=help_with
+        ) as run:
+            assert probe("/new/dbo-opt") is True
+            assert probe("/new/dbo-opt") is True
+            assert run.call_count == 1  # cached
+            assert run.call_args.args[0] == ["/new/dbo-opt", "--help"]
+        with patch.object(
+            async_compile_mod.subprocess, "run", return_value=help_without
+        ):
+            assert probe("/old/dbo-opt") is False
+        with patch.object(
+            async_compile_mod.subprocess, "run", side_effect=OSError("no such file")
+        ):
+            assert probe("/broken/dbo-opt") is False
+        assert probe(None) is False
+    finally:
+        probe.cache_clear()
+
+
 def test_backend_pass_timing_runs_do_not_overwrite_each_other(tmp_path):
     """Two compiles of the same kernel (two ranks racing for one cache key, or
     a recompile) have distinct bundle dirs, so each keeps its own record."""
@@ -317,6 +392,15 @@ def test_backend_pass_timing_unwritable_dir_does_not_fail_compile(tmp_path):
     timing_dir.write_text("not a directory")
     with patch.object(async_compile_mod, "logger") as logger:
         _run_with_pass_timing(bundle_dir, {}, timing_dir)
+    logger.warning.assert_called_once()
+    assert "pass timing not saved" in logger.warning.call_args.args[0]
+
+
+def test_backend_pass_timing_bad_report_does_not_fail_compile(tmp_path):
+    """Not only OSError: a report that is not text is logged, never raised."""
+    bundle_dir = _compiled_dir(tmp_path)
+    with patch.object(async_compile_mod, "logger") as logger:
+        _run_with_pass_timing(bundle_dir, {}, tmp_path / "timing", stderr=None)
     logger.warning.assert_called_once()
     assert "pass timing not saved" in logger.warning.call_args.args[0]
 
